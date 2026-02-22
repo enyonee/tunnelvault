@@ -1,0 +1,78 @@
+# defaults.toml — все настройки tunnelvault
+# Приоритет: defaults.toml -> ENV -> .vpn-settings.json -> wizard
+# Скопируй в defaults.toml и редактируй:  cp defaults.toml.example defaults.toml
+#
+# Каждый туннель описан в отдельной секции [tunnels.<name>]
+# Обязательное поле: type (openvpn | fortivpn | singbox)
+# Опциональные: order, enabled, config_file, log, interface, auth, routes, dns, checks
+
+# Host routes к VPN-серверам через default GW (до старта туннелей)
+[global.vpn_server_routes]
+hosts = ["203.0.113.10", "203.0.113.20"]
+resolve = ["vpn.example.com"]
+
+# === Туннели ===
+
+[tunnels.openvpn]
+type = "openvpn"
+order = 1
+config_file = "client.ovpn"
+log = "/tmp/openvpn.log"
+
+[tunnels.openvpn.checks]
+http = ["https://google.com", "https://github.com"]
+external_ip_url = "https://ifconfig.me"
+
+[tunnels.fortivpn]
+type = "fortivpn"
+order = 2
+log = "/tmp/openfortivpn.log"
+fallback_gateway = "169.254.2.1"
+
+[tunnels.fortivpn.auth]
+host = "vpn.example.com"
+port = "44333"
+cert_mode = "auto"
+# login и pass — без дефолтов, wizard спросит
+
+[tunnels.fortivpn.routes]
+# Простой формат - wizard спросит, если не задано:
+targets = ["*.example.local", "*.internal.local", "10.0.0.0/8", "192.168.100.0/24"]
+# Расширенный формат (в дополнение к targets или вместо):
+# networks = ["192.168.100.0/24", "10.0.0.0/8"]
+# hosts = ["10.0.1.1"]
+
+[tunnels.fortivpn.dns]
+nameservers = ["10.0.1.1", "10.0.1.2"]
+# domains заполняются автоматически из targets (*.domain → domain)
+# domains = ["example.local", "internal.local"]
+
+[tunnels.fortivpn.checks]
+ports = [
+    { host = "192.168.100.1", port = 8080 },
+    { host = "192.168.100.1", port = 1521 },
+]
+ping = [
+    { host = "10.0.1.1", label = "DNS-1", fallback = "port:53" },
+    { host = "10.0.1.2", label = "DNS-2", fallback = "port:53" },
+]
+dns = [
+    { name = "app.example.local", server = "10.0.1.1" },
+    { name = "dc.internal.local", server = "10.0.1.1" },
+]
+
+[tunnels.singbox]
+type = "singbox"
+order = 3
+config_file = "singbox.json"
+interface = "utun99"
+log = "/tmp/sing-box.log"
+
+[tunnels.singbox.routes]
+hosts = ["203.0.113.30"]
+networks = ["172.18.0.0/16"]
+
+[tunnels.singbox.checks]
+ports = [{ host = "203.0.113.30", port = 443 }]
+ping = [{ host = "172.18.0.1", label = "singbox gw" }]
+http = ["https://service.example.com"]

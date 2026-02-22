@@ -1,0 +1,34 @@
+# Credentials
+.vpn-settings.json
+.vpn-settings
+
+# Real config (use defaults.toml.example as template)
+defaults.toml
+
+# VPN configs (contain keys/certs)
+*.ovpn
+piklema.json
+
+# Legacy bash scripts (contain hardcoded infrastructure)
+connect-vpn.sh
+disconnect-vpn.sh
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# Logs
+tunnelvault.log
+*.log
+
+# pytest
+.pytest_cache/
+
+# OS
+.DS_Store

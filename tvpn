@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# tunnelvault runner — активирует venv и запускает скрипт
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [ ! -d "$SCRIPT_DIR/.venv" ]; then
+    echo "venv не найден. Запусти: ./setup.sh" >&2
+    exit 1
+fi
+
+exec "$SCRIPT_DIR/.venv/bin/python" "$SCRIPT_DIR/tunnelvault.py" "$@"

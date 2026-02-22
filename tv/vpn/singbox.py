@@ -1,0 +1,115 @@
+"""sing-box tunnel connection."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from tv import proc, ui
+from tv.app_config import cfg
+from tv.logger import Logger
+from tv.vpn.base import ConfigParam, TunnelPlugin, VPNResult
+from tv.vpn.registry import register
+
+
+@register("singbox")
+class SingBoxPlugin(TunnelPlugin):
+    """sing-box tunnel plugin."""
+
+    process_names = ["sing-box"]
+
+    @classmethod
+    def discover_pid(cls, tcfg, script_dir) -> int | None:
+        config_path = script_dir / tcfg.config_file
+        pids = proc.find_pids(f"sing-box run -c {config_path}")
+        return pids[0] if pids else None
+
+    @classmethod
+    def config_schema(cls) -> list[ConfigParam]:
+        return [
+            ConfigParam("config_file", "sing-box конфиг", default=cfg.defaults.singbox_config,
+                         env_var="VPN_SINGBOX_CONFIG", target="config_file"),
+        ]
+
+    @property
+    def process_name(self) -> str:
+        return "sing-box"
+
+    @property
+    def display_name(self) -> str:
+        return "sing-box"
+
+    def connect(self) -> VPNResult:
+        config_path = self.script_dir / self.cfg.config_file
+        log_path = self._default_log_path()
+        interface = self.cfg.interface
+
+        self.log.log("INFO", f"Конфиг: {config_path}")
+
+        # Launch in background
+        self.log.log("INFO", f"Запуск: sudo sing-box run -c {config_path}")
+        sb_proc = proc.run_background(
+            ["sing-box", "run", "-c", str(config_path)],
+            sudo=True,
+            log_path=str(log_path),
+        )
+        sb_pid = sb_proc.pid
+        self._pid = sb_pid
+        self.log.log("INFO", f"sing-box PID={sb_pid}")
+
+        # Wait for interface
+        if not proc.wait_for(
+            f"sing-box ({interface})",
+            lambda: self.net.check_interface(interface),
+            cfg.timeouts.singbox_iface,
+            self.log,
+        ):
+            _show_error(sb_proc, log_path, self.log)
+            return VPNResult(ok=False, pid=sb_pid)
+
+        # Connected
+        ui.ok(f"sing-box подключен ({interface})")
+        self.log.log("INFO", f"sing-box подключен ({interface})")
+        self.log.log_lines("INFO", f"ifconfig {interface}:\n{self.net.iface_info(interface)}")
+
+        # Routes through interface (hosts + networks from config/targets)
+        self.add_routes()
+
+        # DNS resolver (domains + nameservers from config/targets)
+        self.setup_dns()
+
+        self.log.log("INFO", f"Маршруты после sing-box:\n{self.net.route_table()}")
+
+        return VPNResult(ok=True, pid=sb_pid)
+
+    def _kill_by_pattern(self) -> None:
+        config_path = self.script_dir / self.cfg.config_file
+        proc.kill_pattern(f"sing-box run -c {config_path}", sudo=True)
+
+
+def _show_error(sb_proc, log_path: Path, log: Logger) -> None:
+    """Display sing-box error details."""
+    ui.fail(f"sing-box не поднялся за {cfg.timeouts.singbox_iface}с")
+    log.log("ERROR", f"sing-box не поднялся за {cfg.timeouts.singbox_iface}с")
+
+    pid = sb_proc.pid
+    if proc.is_alive(pid):
+        print(f"  {ui.YELLOW}├─{ui.NC} Процесс жив (PID={pid}), но интерфейс не появился")
+        log.log("WARN", f"Процесс sing-box PID={pid} жив, но интерфейс не появился")
+    else:
+        rc = sb_proc.poll()
+        rc_display = rc if rc is not None else "?"
+        print(f"  {ui.RED}├─{ui.NC} Процесс завершился с кодом: {ui.RED}{ui.BOLD}{rc_display}{ui.NC}")
+        log.log("ERROR", f"Процесс sing-box завершился с кодом {rc}")
+
+    try:
+        content = log_path.read_text()
+        if content.strip():
+            log.log_lines("ERROR", content)
+            tail = content.strip().splitlines()[-10:]
+            ui.show_log_tail("Лог sing-box:", tail, f"cat {log_path}")
+        else:
+            print(f"  {ui.YELLOW}├─{ui.NC} Лог пуст")
+            print(f"  {ui.YELLOW}└─{ui.NC} Полный лог: {ui.DIM}cat {log_path}{ui.NC}")
+    except OSError:
+        print(f"  {ui.YELLOW}├─{ui.NC} Лог недоступен")
+        print(f"  {ui.YELLOW}└─{ui.NC} Полный лог: {ui.DIM}cat {log_path}{ui.NC}")
