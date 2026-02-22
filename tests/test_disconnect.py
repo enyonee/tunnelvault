@@ -21,7 +21,7 @@ def v3_defs():
         "routes": {
             "vpn_servers": {
                 "hosts": ["203.0.113.10"],
-                "resolve": ["vpn.example.com"],
+                "resolve": ["vpn.test.local"],
             },
         },
     }
@@ -34,7 +34,7 @@ def global_defs():
         "global": {
             "vpn_server_routes": {
                 "hosts": ["10.20.30.40"],
-                "resolve": ["vpn.corp.com"],
+                "resolve": ["vpn.test.local"],
             },
         },
     }
@@ -82,7 +82,7 @@ class TestDisconnect:
         with patch("tv.disconnect.proc"):
             run(net=mock_net, log=logger, defs=v3_defs)
 
-        mock_net.resolve_host.assert_called_with("vpn.example.com")
+        mock_net.resolve_host.assert_called_with("vpn.test.local")
         deleted_hosts = [c[0][0] for c in mock_net.delete_host_route.call_args_list]
         assert "5.6.7.8" in deleted_hosts
         assert "9.10.11.12" in deleted_hosts
@@ -248,7 +248,7 @@ class TestRunPlugins:
         tunnels = [
             TunnelConfig(
                 name="fortivpn", type="fortivpn", order=1,
-                dns={"nameservers": ["10.0.1.1"], "domains": ["corp.local"]},
+                dns={"nameservers": ["10.0.1.1"], "domains": ["alpha.local"]},
             ),
         ]
         with patch("tv.vpn.fortivpn.proc"), \

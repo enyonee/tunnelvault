@@ -24,7 +24,7 @@ class TestRunAllFromTunnels:
     @patch("tv.checks._check_port", return_value=True)
     def test_port_check_ok(self, mock_port, capsys):
         checks_cfg = {"ports": [{"host": "10.0.0.1", "port": 8080}]}
-        results, _ = run_all_from_tunnels([("corp", True, checks_cfg)])
+        results, _ = run_all_from_tunnels([("vpn1", True, checks_cfg)])
 
         assert len(results) == 1
         assert results[0].status == "ok"
@@ -34,14 +34,14 @@ class TestRunAllFromTunnels:
     @patch("tv.checks._check_port", return_value=False)
     def test_port_check_fail(self, mock_port, capsys):
         checks_cfg = {"ports": [{"host": "10.0.0.1", "port": 8080}]}
-        results, _ = run_all_from_tunnels([("corp", True, checks_cfg)])
+        results, _ = run_all_from_tunnels([("vpn1", True, checks_cfg)])
 
         assert results[0].status == "fail"
 
     @patch("tv.checks._check_port", return_value=True)
     def test_tunnel_not_ok_skips_checks(self, mock_port, capsys):
         checks_cfg = {"ports": [{"host": "10.0.0.1", "port": 8080}]}
-        results, _ = run_all_from_tunnels([("corp", False, checks_cfg)])
+        results, _ = run_all_from_tunnels([("vpn1", False, checks_cfg)])
 
         assert results[0].status == "skip"
         mock_port.assert_not_called()
@@ -49,18 +49,18 @@ class TestRunAllFromTunnels:
     @patch("tv.checks._check_ping", return_value=True)
     def test_ping_check(self, mock_ping, capsys):
         checks_cfg = {"ping": [{"host": "10.0.0.1", "label": "GW"}]}
-        results, _ = run_all_from_tunnels([("corp", True, checks_cfg)])
+        results, _ = run_all_from_tunnels([("vpn1", True, checks_cfg)])
 
         assert results[0].status == "ok"
         assert "GW" in results[0].label
 
     @patch("tv.checks._check_dns", return_value=True)
     def test_dns_check(self, mock_dns, capsys):
-        checks_cfg = {"dns": [{"name": "app.corp.local", "server": "10.0.1.1"}]}
-        results, _ = run_all_from_tunnels([("corp", True, checks_cfg)])
+        checks_cfg = {"dns": [{"name": "app.alpha.local", "server": "10.0.1.1"}]}
+        results, _ = run_all_from_tunnels([("vpn1", True, checks_cfg)])
 
         assert results[0].status == "ok"
-        assert "app.corp.local" in results[0].label
+        assert "app.alpha.local" in results[0].label
 
     @patch("tv.checks._check_http_any", return_value=True)
     def test_http_check(self, mock_http, capsys):
@@ -99,7 +99,7 @@ class TestRunAllFromTunnels:
     @patch("tv.checks._check_http_any", return_value=True)
     def test_multiple_tunnels(self, mock_http, mock_port, capsys):
         results, _ = run_all_from_tunnels([
-            ("corp", True, {"ports": [{"host": "10.0.0.1", "port": 8080}]}),
+            ("vpn1", True, {"ports": [{"host": "10.0.0.1", "port": 8080}]}),
             ("openvpn", True, {"http": ["https://google.com"]}),
         ])
         assert len(results) == 2
@@ -109,7 +109,7 @@ class TestRunAllFromTunnels:
     def test_with_logger(self, mock_port, logger, capsys):
         checks_cfg = {"ports": [{"host": "10.0.0.1", "port": 8080}]}
         results, _ = run_all_from_tunnels(
-            [("corp", True, checks_cfg)],
+            [("vpn1", True, checks_cfg)],
             logger=logger,
         )
         assert results[0].status == "ok"
@@ -121,7 +121,7 @@ class TestRunAllFromTunnels:
     def test_ping_fallback_port_ok(self, mock_port, mock_ping, capsys):
         """Ping fails but fallback port check succeeds."""
         checks_cfg = {"ping": [{"host": "10.0.0.1", "label": "DNS", "fallback": "port:53"}]}
-        results, _ = run_all_from_tunnels([("corp", True, checks_cfg)])
+        results, _ = run_all_from_tunnels([("vpn1", True, checks_cfg)])
 
         assert results[0].status == "ok"
         assert "fallback" in results[0].detail
@@ -134,7 +134,7 @@ class TestRunAllFromTunnels:
     def test_ping_fallback_port_both_fail(self, mock_port, mock_ping, capsys):
         """Both ping and fallback port fail."""
         checks_cfg = {"ping": [{"host": "10.0.0.1", "label": "DNS", "fallback": "port:53"}]}
-        results, _ = run_all_from_tunnels([("corp", True, checks_cfg)])
+        results, _ = run_all_from_tunnels([("vpn1", True, checks_cfg)])
 
         assert results[0].status == "fail"
         assert "port:53" in results[0].detail
@@ -144,7 +144,7 @@ class TestRunAllFromTunnels:
     def test_ping_ok_skips_fallback(self, mock_port, mock_ping, capsys):
         """When ping succeeds, fallback is not called."""
         checks_cfg = {"ping": [{"host": "10.0.0.1", "label": "DNS", "fallback": "port:53"}]}
-        results, _ = run_all_from_tunnels([("corp", True, checks_cfg)])
+        results, _ = run_all_from_tunnels([("vpn1", True, checks_cfg)])
 
         assert results[0].status == "ok"
         assert results[0].detail == "ping ok"
@@ -155,7 +155,7 @@ class TestRunAllFromTunnels:
     def test_ping_fallback_dns_ok(self, mock_dns, mock_ping, capsys):
         """Ping fails but fallback DNS check succeeds."""
         checks_cfg = {"ping": [{"host": "10.0.0.1", "label": "NS", "fallback": "dns:test.local"}]}
-        results, _ = run_all_from_tunnels([("corp", True, checks_cfg)])
+        results, _ = run_all_from_tunnels([("vpn1", True, checks_cfg)])
 
         assert results[0].status == "ok"
         assert "dns:test.local" in results[0].detail
@@ -165,7 +165,7 @@ class TestRunAllFromTunnels:
     def test_ping_no_fallback(self, mock_ping, capsys):
         """Ping fails without fallback - plain fail."""
         checks_cfg = {"ping": [{"host": "10.0.0.1", "label": "GW"}]}
-        results, _ = run_all_from_tunnels([("corp", True, checks_cfg)])
+        results, _ = run_all_from_tunnels([("vpn1", True, checks_cfg)])
 
         assert results[0].status == "fail"
         assert results[0].detail == "не пингуется"
@@ -173,7 +173,7 @@ class TestRunAllFromTunnels:
     def test_ping_skip_when_tunnel_down(self, capsys):
         """Ping check skipped when tunnel is not ok."""
         checks_cfg = {"ping": [{"host": "10.0.0.1", "label": "GW", "fallback": "port:53"}]}
-        results, _ = run_all_from_tunnels([("corp", False, checks_cfg)])
+        results, _ = run_all_from_tunnels([("vpn1", False, checks_cfg)])
 
         assert results[0].status == "skip"
 
@@ -183,7 +183,7 @@ class TestRunAllFromTunnels:
         """Fallback result is logged correctly."""
         checks_cfg = {"ping": [{"host": "10.0.0.1", "label": "DNS", "fallback": "port:53"}]}
         results, _ = run_all_from_tunnels(
-            [("corp", True, checks_cfg)],
+            [("vpn1", True, checks_cfg)],
             logger=logger,
         )
         assert results[0].status == "ok"

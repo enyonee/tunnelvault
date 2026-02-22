@@ -43,12 +43,12 @@ def _setup_mock_net_snapshot(mock_net):
 @pytest.fixture
 def forti_cfg(tmp_dir) -> TunnelConfig:
     return TunnelConfig(
-        name="office",
+        name="forti1",
         type="fortivpn",
         order=2,
         log=str(tmp_dir / "openfortivpn.log"),
         auth={
-            "host": "vpn.example.com",
+            "host": "vpn.test.local",
             "port": "44333",
             "login": "testuser",
             "pass": "testpass",
@@ -56,7 +56,7 @@ def forti_cfg(tmp_dir) -> TunnelConfig:
             "trusted_cert": "abcdef1234567890" * 4,
         },
         routes={"networks": ["192.168.100.0/24", "10.0.0.0/8"]},
-        dns={"nameservers": ["10.0.1.1", "10.0.1.2"], "domains": ["corp.local", "internal.local"]},
+        dns={"nameservers": ["10.0.1.1", "10.0.1.2"], "domains": ["alpha.local", "bravo.local"]},
         extra={"fallback_gateway": "169.254.2.1"},
     )
 
@@ -68,11 +68,11 @@ def plugin(forti_cfg, mock_net, logger, tmp_dir):
 
 
 @contextlib.contextmanager
-def _forti_connect_ok(plugin, log_text="remote IP address = 10.0.0.1\n"):
-    """Set up successful FortiVPN connect: log, popen(pid=9999), ppp0 detected."""
+def _forti_connect_ok(plugin, ppp_gw="10.0.0.1"):
+    """Set up successful FortiVPN connect: popen(pid=9999), ppp0 detected, ppp_peer returns gw."""
     forti_log = Path(plugin.cfg.log)
     forti_log.parent.mkdir(parents=True, exist_ok=True)
-    forti_log.write_text(log_text)
+    forti_log.write_text("")
     mock_popen = MagicMock()
     mock_popen.pid = 9999
     with _patch_config_file() as mock_unlink, \
@@ -80,15 +80,13 @@ def _forti_connect_ok(plugin, log_text="remote IP address = 10.0.0.1\n"):
         mock_proc.run_background.return_value = mock_popen
         mock_proc.wait_for.side_effect = lambda desc, fn, *a, **kw: fn() or fn()
         plugin.net.iface_info.return_value = "ppp0: flags=8051<UP>"
+        plugin.net.ppp_peer.return_value = ppp_gw
         yield mock_proc, mock_unlink
 
 
 @contextlib.contextmanager
-def _forti_connect_fail(plugin, log_text="", poll=1, is_alive=False):
-    """Set up failing FortiVPN connect: log, popen(pid=9999), wait_for=False."""
-    forti_log = Path(plugin.cfg.log)
-    forti_log.parent.mkdir(parents=True, exist_ok=True)
-    forti_log.write_text(log_text)
+def _forti_connect_fail(plugin, poll=1, is_alive=False):
+    """Set up failing FortiVPN connect: popen(pid=9999), wait_for=False."""
     mock_popen = MagicMock()
     mock_popen.pid = 9999
     mock_popen.poll.return_value = poll
@@ -120,52 +118,33 @@ class TestMeta:
 # =========================================================================
 
 class TestDetectPppGateway:
-    def test_from_log_remote_ip(self, tmp_path, mock_net):
-        """Находит gateway из строки 'remote ip address' в логе."""
-        log = tmp_path / "forti.log"
-        log.write_text("INFO: remote IP address = 192.168.100.1\n")
-        gw = _detect_ppp_gateway(log, mock_net)
+    def test_found_on_first_attempt(self, mock_net):
+        """ppp_peer возвращает gateway с первой попытки."""
+        mock_net.ppp_peer.return_value = "192.168.100.1"
+        gw = _detect_ppp_gateway(mock_net, interface="ppp0")
         assert gw == "192.168.100.1"
+        mock_net.ppp_peer.assert_called_once_with("ppp0")
 
-    def test_from_log_ppp_gateway(self, tmp_path, mock_net):
-        """Находит gateway из строки 'PPP gateway'."""
-        log = tmp_path / "forti.log"
-        log.write_text("PPP gateway: 10.0.0.1\n")
-        gw = _detect_ppp_gateway(log, mock_net)
+    def test_found_on_second_attempt(self, mock_net):
+        """ppp_peer возвращает пустую строку, потом gateway."""
+        mock_net.ppp_peer.side_effect = ["", "10.0.0.1"]
+        with patch("tv.vpn.fortivpn.time.sleep"):
+            gw = _detect_ppp_gateway(mock_net, interface="ppp0")
         assert gw == "10.0.0.1"
+        assert mock_net.ppp_peer.call_count == 2
 
-    def test_from_log_peer_keyword(self, tmp_path, mock_net):
-        """Находит gateway из строки с 'peer'."""
-        log = tmp_path / "forti.log"
-        log.write_text("peer address: 172.16.0.1\n")
-        gw = _detect_ppp_gateway(log, mock_net)
+    def test_custom_interface(self, mock_net):
+        """Передаётся указанный interface."""
+        mock_net.ppp_peer.return_value = "172.16.0.1"
+        gw = _detect_ppp_gateway(mock_net, interface="ppp1")
         assert gw == "172.16.0.1"
+        mock_net.ppp_peer.assert_called_once_with("ppp1")
 
-    @patch("tv.vpn.fortivpn.time.sleep")  # не ждать 5с
-    @patch("platform.system", return_value="Darwin")
-    def test_ifconfig_fallback_darwin(self, _, mock_sleep, tmp_path, mock_net):
-        """Если лог пуст - fallback на ifconfig ppp0 (Darwin)."""
-        log = tmp_path / "forti.log"
-        log.write_text("")
-        mock_net.iface_info.return_value = (
-            "ppp0: flags=8051<UP>\n"
-            "\tinet 10.0.0.2 --> 10.0.0.1 netmask 0xffffffff\n"
-        )
-        gw = _detect_ppp_gateway(log, mock_net)
-        assert gw == "10.0.0.1"
-
-    @patch("tv.vpn.fortivpn.time.sleep")
-    @patch("platform.system", return_value="Linux")
-    def test_ifconfig_fallback_linux(self, _, mock_sleep, tmp_path, mock_net):
-        """Linux ifconfig формат: P-t-P:X.X.X.X."""
-        log = tmp_path / "forti.log"
-        log.write_text("")
-        mock_net.iface_info.return_value = (
-            "ppp0 Link encap:PPP\n"
-            "inet addr:10.0.0.2  P-t-P:10.0.0.1  Mask:255.255.255.255\n"
-        )
-        gw = _detect_ppp_gateway(log, mock_net)
-        assert gw == "10.0.0.1"
+    def test_default_interface_is_ppp0(self, mock_net):
+        """По умолчанию проверяет ppp0."""
+        mock_net.ppp_peer.return_value = "10.0.0.1"
+        _detect_ppp_gateway(mock_net)
+        mock_net.ppp_peer.assert_called_once_with("ppp0")
 
 
 # =========================================================================
@@ -174,30 +153,18 @@ class TestDetectPppGateway:
 
 class TestDetectPppGatewayInverse:
     @patch("tv.vpn.fortivpn.time.sleep")
-    def test_empty_log_no_ifconfig(self, mock_sleep, tmp_path, mock_net):
-        """Лог пуст + ifconfig ppp0 пуст -> пустой gateway."""
-        log = tmp_path / "forti.log"
-        log.write_text("")
-        mock_net.iface_info.return_value = ""
-        gw = _detect_ppp_gateway(log, mock_net)
+    def test_all_attempts_empty(self, mock_sleep, mock_net):
+        """ppp_peer всегда возвращает пустую строку - пустой gateway."""
+        mock_net.ppp_peer.return_value = ""
+        gw = _detect_ppp_gateway(mock_net, interface="ppp0")
         assert gw == ""
 
     @patch("tv.vpn.fortivpn.time.sleep")
-    def test_log_no_ip_in_matching_line(self, mock_sleep, tmp_path, mock_net):
-        """Строка с keyword, но без IP."""
-        log = tmp_path / "forti.log"
-        log.write_text("peer: unknown\n")
-        mock_net.iface_info.return_value = ""
-        gw = _detect_ppp_gateway(log, mock_net)
-        assert gw == ""
-
-    @patch("tv.vpn.fortivpn.time.sleep")
-    def test_log_file_not_found(self, mock_sleep, tmp_path, mock_net):
-        """Файл лога не существует - OSError, не crash."""
-        log = tmp_path / "nonexistent.log"
-        mock_net.iface_info.return_value = ""
-        gw = _detect_ppp_gateway(log, mock_net)
-        assert gw == ""
+    def test_sleeps_between_attempts(self, mock_sleep, mock_net):
+        """Между попытками вызывается sleep."""
+        mock_net.ppp_peer.return_value = ""
+        _detect_ppp_gateway(mock_net, interface="ppp0")
+        assert mock_sleep.call_count > 0
 
 
 # =========================================================================
@@ -243,13 +210,13 @@ class TestConnectSuccess:
 
     def test_adds_host_routes_from_targets(self, plugin):
         """После коннекта добавляет host-маршруты через detected interface."""
-        plugin.cfg.routes["hosts"] = ["git.corp.com", "5.6.7.8"]
+        plugin.cfg.routes["hosts"] = ["git.test.local", "5.6.7.8"]
         with _forti_connect_ok(plugin):
             plugin.connect()
 
         iface_calls = plugin.net.add_iface_route.call_args_list
         added_targets = [c[0][0] for c in iface_calls]
-        assert "git.corp.com" in added_targets
+        assert "git.test.local" in added_targets
         assert "5.6.7.8" in added_targets
 
     def test_sets_dns_resolvers(self, plugin):
@@ -269,7 +236,7 @@ class TestConnectSuccess:
 class TestConnectFailure:
     def test_ppp_timeout(self, plugin, capsys):
         """ppp interface не появляется за 20с -> fail."""
-        with _forti_connect_fail(plugin, "ERROR: connection refused\n"):
+        with _forti_connect_fail(plugin):
             r = plugin.connect()
 
         assert r.ok is False
@@ -277,7 +244,7 @@ class TestConnectFailure:
 
     def test_process_alive_but_no_ppp(self, plugin, capsys):
         """Процесс жив, но ppp нет - показывает warning."""
-        with _forti_connect_fail(plugin, "Negotiating...\n", is_alive=True):
+        with _forti_connect_fail(plugin, is_alive=True):
             r = plugin.connect()
 
         assert r.ok is False
@@ -286,25 +253,24 @@ class TestConnectFailure:
 
     def test_process_crashed_shows_exit_code(self, plugin, capsys):
         """Процесс упал - показывает exit code."""
-        with _forti_connect_fail(plugin, "FATAL: auth failed\n", poll=2):
+        with _forti_connect_fail(plugin, poll=2):
             r = plugin.connect()
 
         assert r.ok is False
         out = capsys.readouterr().out
-        assert "FATAL: auth failed" in out
+        assert "2" in out
 
-    def test_empty_log_on_failure(self, plugin, capsys):
-        """Лог пуст при ошибке - не падает, показывает сообщение."""
+    def test_shows_log_hint(self, plugin, capsys):
+        """При ошибке показывает путь к логу."""
         with _forti_connect_fail(plugin):
-            r = plugin.connect()
+            plugin.connect()
 
-        assert r.ok is False
         out = capsys.readouterr().out
-        assert "Лог пуст" in out
+        assert "openfortivpn.log" in out
 
     def test_poll_none_shows_question_mark(self, plugin, capsys):
         """poll() возвращает None - показываем '?' вместо None."""
-        with _forti_connect_fail(plugin, "something\n", poll=None):
+        with _forti_connect_fail(plugin, poll=None):
             r = plugin.connect()
 
         out = capsys.readouterr().out
@@ -313,7 +279,7 @@ class TestConnectFailure:
 
     def test_no_ppp_gateway_uses_fallback(self, plugin, capsys):
         """Не нашли PPP gateway - используем fallback."""
-        with _forti_connect_ok(plugin, log_text=""), \
+        with _forti_connect_ok(plugin, ppp_gw=""), \
              patch("tv.vpn.fortivpn._detect_ppp_gateway", return_value=""):
             r = plugin.connect()
 
@@ -324,7 +290,7 @@ class TestConnectFailure:
     def test_no_fallback_gateway(self, plugin, capsys):
         """Нет fallback gateway - warn, но ok."""
         plugin.cfg.extra = {}
-        with _forti_connect_ok(plugin, log_text=""), \
+        with _forti_connect_ok(plugin, ppp_gw=""), \
              patch("tv.vpn.fortivpn._detect_ppp_gateway", return_value=""):
             r = plugin.connect()
 
@@ -354,6 +320,77 @@ class TestConnectFailure:
             plugin.connect()
 
         mock_unlink.assert_not_called()
+
+
+# =========================================================================
+# Managed vs native routing mode
+# =========================================================================
+
+class TestRoutingMode:
+    def test_managed_mode_passes_no_routes(self, plugin):
+        """With custom routes/DNS, runs with --no-routes --no-dns."""
+        with _forti_connect_ok(plugin) as (mock_proc, _):
+            plugin.connect()
+            cmd = mock_proc.run_background.call_args_list[0][0][0]
+            assert "--no-routes" in cmd
+            assert "--no-dns" in cmd
+
+    def test_native_mode_skips_no_routes(self, tmp_dir, mock_net, logger):
+        """Without custom routes/DNS, runs without --no-routes --no-dns."""
+        cfg = TunnelConfig(
+            name="bare", type="fortivpn", order=2,
+            log=str(tmp_dir / "forti.log"),
+            auth={"host": "vpn.test", "port": "443", "login": "u", "pass": "p",
+                  "trusted_cert": "abc"},
+            routes={}, dns={},
+        )
+        _setup_mock_net_snapshot(mock_net)
+        p = FortiVPNPlugin(cfg, mock_net, logger, tmp_dir)
+
+        with _forti_connect_ok(p) as (mock_proc, _):
+            r = p.connect()
+
+        cmd = mock_proc.run_background.call_args_list[0][0][0]
+        assert "--no-routes" not in cmd
+        assert "--no-dns" not in cmd
+        assert r.ok is True
+
+    def test_native_mode_skips_add_routes(self, tmp_dir, mock_net, logger):
+        """Native mode does not call add_iface_route."""
+        cfg = TunnelConfig(
+            name="bare", type="fortivpn", order=2,
+            log=str(tmp_dir / "forti.log"),
+            auth={"host": "vpn.test", "port": "443", "login": "u", "pass": "p",
+                  "trusted_cert": "abc"},
+            routes={}, dns={},
+        )
+        _setup_mock_net_snapshot(mock_net)
+        p = FortiVPNPlugin(cfg, mock_net, logger, tmp_dir)
+
+        with _forti_connect_ok(p):
+            p.connect()
+
+        mock_net.add_iface_route.assert_not_called()
+        mock_net.setup_dns_resolver.assert_not_called()
+
+    def test_routes_only_is_managed(self, tmp_dir, mock_net, logger):
+        """Networks without DNS is still managed mode."""
+        cfg = TunnelConfig(
+            name="routes_only", type="fortivpn", order=2,
+            log=str(tmp_dir / "forti.log"),
+            auth={"host": "vpn.test", "port": "443", "login": "u", "pass": "p",
+                  "trusted_cert": "abc"},
+            routes={"networks": ["10.0.0.0/8"]}, dns={},
+        )
+        _setup_mock_net_snapshot(mock_net)
+        p = FortiVPNPlugin(cfg, mock_net, logger, tmp_dir)
+
+        with _forti_connect_ok(p) as (mock_proc, _):
+            p.connect()
+
+        cmd = mock_proc.run_background.call_args_list[0][0][0]
+        assert "--no-routes" in cmd
+        assert "--no-dns" in cmd
 
 
 # =========================================================================
@@ -426,7 +463,7 @@ class TestDisconnect:
     def test_disconnect_pid_timeout_warns_and_pattern_fallback(self, plugin):
         """PID kill timeout -> warning logged + pattern fallback + config cleaned."""
         plugin._pid = 12345
-        plugin._conf_path = "/tmp/forti_office.conf"
+        plugin._conf_path = "/tmp/forti_forti1.conf"
         with patch("tv.vpn.base.proc") as base_proc, \
              patch("tv.vpn.base.time.sleep"), \
              patch("tv.vpn.fortivpn.proc") as forti_proc, \
@@ -444,7 +481,7 @@ class TestDisconnect:
         # Pattern fallback called
         forti_proc.kill_pattern.assert_called_once()
         # Config cleaned up
-        mock_unlink.assert_called_once_with("/tmp/forti_office.conf")
+        mock_unlink.assert_called_once_with("/tmp/forti_forti1.conf")
 
     def test_disconnect_cleans_config(self, plugin):
         """Disconnect removes temp config file."""

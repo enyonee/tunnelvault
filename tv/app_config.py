@@ -36,7 +36,7 @@ class Timeouts:
 
 @dataclass
 class Paths:
-    log_dir: str = "/tmp"
+    log_dir: str = "logs"
     temp_dir: str = "/tmp"
     settings_file: str = ".vpn-settings.json"
     defaults_file: str = "defaults.toml"

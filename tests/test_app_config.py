@@ -33,7 +33,7 @@ class TestDefaults:
         ("timeouts", "ping_warmup", 2),
         ("timeouts", "ps_aux", 10),
         # paths
-        ("paths", "log_dir", "/tmp"),
+        ("paths", "log_dir", "logs"),
         ("paths", "temp_dir", "/tmp"),
         ("paths", "settings_file", ".vpn-settings.json"),
         ("paths", "defaults_file", "defaults.toml"),
@@ -107,7 +107,7 @@ class TestReset:
         assert cfg.timeouts.process == 999
         reset()
         assert cfg.timeouts.process == 30
-        assert cfg.paths.log_dir == "/tmp"
+        assert cfg.paths.log_dir == "logs"
 
     def test_reset_preserves_identity(self):
         original_id = id(cfg)

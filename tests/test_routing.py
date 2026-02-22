@@ -14,18 +14,18 @@ from tv.vpn.base import TunnelConfig
 
 class TestParseTargets:
     @pytest.mark.parametrize("inputs,domains,networks,hosts", [
-        (["*.corp.local"], ["corp.local"], [], []),
+        (["*.alpha.local"], ["alpha.local"], [], []),
         (["10.0.0.0/8"], [], ["10.0.0.0/8"], []),
         (["192.168.1.1"], [], [], ["192.168.1.1"]),
-        (["gitlab.example.com"], [], [], ["gitlab.example.com"]),
+        (["git.test.local"], [], [], ["git.test.local"]),
         ([], [], [], []),
-        (["  *.corp.local  ", "  10.0.0.0/8  "], ["corp.local"], ["10.0.0.0/8"], []),
+        (["  *.alpha.local  ", "  10.0.0.0/8  "], ["alpha.local"], ["10.0.0.0/8"], []),
         (["", "  ", "10.0.0.0/8"], [], ["10.0.0.0/8"], []),
         (["999.999.999.999/99"], [], [], []),
         (["*.a.local", "*.b.local", "*.c.local"], ["a.local", "b.local", "c.local"], [], []),
         (["10.0.0.1/8"], [], ["10.0.0.1/8"], []),
         (["999.999.999.999"], [], [], []),
-        (["999.0.0.1", "10.0.0.1", "*.corp.local"], ["corp.local"], [], ["10.0.0.1"]),
+        (["999.0.0.1", "10.0.0.1", "*.alpha.local"], ["alpha.local"], [], ["10.0.0.1"]),
     ])
     def test_parse(self, inputs, domains, networks, hosts):
         result = parse_targets(inputs)
@@ -39,11 +39,11 @@ class TestParseTargets:
             "10.0.0.0/8",
             "192.168.77.0/24",
             "192.168.1.1",
-            "git.example.com",
+            "git.test.local",
         ])
         assert result.domains == ["asup.local"]
         assert result.networks == ["10.0.0.0/8", "192.168.77.0/24"]
-        assert result.hosts == ["192.168.1.1", "git.example.com"]
+        assert result.hosts == ["192.168.1.1", "git.test.local"]
 
 
 # =========================================================================
@@ -54,8 +54,8 @@ class TestValidateTarget:
     @pytest.mark.parametrize("target,expected_kind,err_contains", [
         ("10.0.0.0/8", "network", ""),
         ("192.168.1.1", "host", ""),
-        ("*.corp.local", "domain", ""),
-        ("git.example.com", "hostname", ""),
+        ("*.alpha.local", "domain", ""),
+        ("git.test.local", "hostname", ""),
         ("999.999.999.999/99", "", "невалидный CIDR"),
         ("999.0.0.1", "", "невалидный IP"),
         ("*.localhost", "", "должен содержать точку"),
@@ -83,27 +83,27 @@ class TestMergeTargets:
         parsed = ParsedTargets(
             networks=["10.0.0.0/8"],
             hosts=["1.2.3.4"],
-            domains=["corp.local"],
+            domains=["alpha.local"],
         )
         merge_targets_into_config(tcfg, parsed)
         assert tcfg.routes["networks"] == ["10.0.0.0/8"]
         assert tcfg.routes["hosts"] == ["1.2.3.4"]
-        assert tcfg.dns["domains"] == ["corp.local"]
+        assert tcfg.dns["domains"] == ["alpha.local"]
 
     def test_no_duplicates(self):
         tcfg = TunnelConfig(
             routes={"networks": ["10.0.0.0/8"], "hosts": ["1.2.3.4"]},
-            dns={"domains": ["corp.local"]},
+            dns={"domains": ["alpha.local"]},
         )
         parsed = ParsedTargets(
             networks=["10.0.0.0/8", "172.16.0.0/12"],
             hosts=["1.2.3.4", "5.6.7.8"],
-            domains=["corp.local", "new.local"],
+            domains=["alpha.local", "new.local"],
         )
         merge_targets_into_config(tcfg, parsed)
         assert tcfg.routes["networks"] == ["10.0.0.0/8", "172.16.0.0/12"]
         assert tcfg.routes["hosts"] == ["1.2.3.4", "5.6.7.8"]
-        assert tcfg.dns["domains"] == ["corp.local", "new.local"]
+        assert tcfg.dns["domains"] == ["alpha.local", "new.local"]
 
     def test_empty_parsed_noop(self):
         tcfg = TunnelConfig(

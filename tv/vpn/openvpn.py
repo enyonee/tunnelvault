@@ -3,12 +3,34 @@
 from __future__ import annotations
 
 import time
+
 from pathlib import Path
 
 from tv import proc, ui
 from tv.app_config import cfg
+from tv.logger import Logger
 from tv.vpn.base import ConfigParam, TunnelPlugin, VPNResult
 from tv.vpn.registry import register
+
+
+def _show_error(pid: int | None, log_path: Path, log: Logger) -> None:
+    """Display OpenVPN error details to user and log."""
+    ui.fail(f"OpenVPN не подключился за {cfg.timeouts.openvpn_init}с")
+    log.log("ERROR", f"OpenVPN не подключился за {cfg.timeouts.openvpn_init}с")
+
+    details: list[tuple[str, str]] = []
+    if pid and proc.is_alive(pid):
+        details.append(("", f"Процесс жив (PID={pid}), но интерфейс не появился"))
+        log.log("WARN", f"Процесс OpenVPN PID={pid} жив, но интерфейс не появился")
+    elif pid:
+        details.append(("", f"Процесс завершился (PID={pid})"))
+        log.log("ERROR", f"Процесс OpenVPN PID={pid} завершился")
+    else:
+        details.append(("", "PID не найден после запуска"))
+        log.log("ERROR", "OpenVPN PID не найден после запуска")
+
+    details.append(("", f"Лог: cat {log_path}"))
+    ui.error_tree(details)
 
 
 @register("openvpn")
@@ -18,7 +40,6 @@ class OpenVPNPlugin(TunnelPlugin):
     process_names = ["openvpn"]
     kill_patterns = [
         "openvpn --config .*/tunnelvault/",
-        "openvpn.*--log /tmp/openvpn",
     ]
 
     @classmethod
@@ -59,6 +80,9 @@ class OpenVPNPlugin(TunnelPlugin):
                 self.log.log("INFO", "OpenVPN: используем Tunnelblick")
                 return VPNResult(ok=True, detail="Tunnelblick")
 
+        # Snapshot interfaces BEFORE connect (for tun detection)
+        ifaces_before = set(self.net.interfaces().keys())
+
         # --- Launch ---
         self.log.log("INFO", f"Запуск: sudo openvpn --config {config_path} --daemon --log {log_path}")
         proc.run(
@@ -73,17 +97,26 @@ class OpenVPNPlugin(TunnelPlugin):
         self._pid = pid
 
         if pid:
-            def check_init() -> bool:
-                # Log is root-owned (created by openvpn daemon), need sudo
-                r = proc.run(
-                    ["grep", "-q", "Initialization Sequence Completed", str(log_path)],
-                    sudo=True,
-                )
-                return r.returncode == 0
+            detected_iface = None
 
-            if proc.wait_for("OpenVPN", check_init, cfg.timeouts.openvpn_init, self.log):
-                ui.ok("OpenVPN подключен")
-                self.log.log("INFO", "OpenVPN подключен")
+            def _check_new_tun():
+                nonlocal detected_iface
+                ifaces_now = set(self.net.interfaces().keys())
+                new_tun = [
+                    i for i in (ifaces_now - ifaces_before)
+                    if i.startswith("tun") or i.startswith("utun")
+                ]
+                if new_tun:
+                    detected_iface = sorted(new_tun)[0]
+                    return True
+                return False
+
+            if proc.wait_for("OpenVPN", _check_new_tun, cfg.timeouts.openvpn_init, self.log):
+                if not self.cfg.interface:
+                    self.cfg.interface = detected_iface
+
+                ui.ok(f"OpenVPN подключен ({detected_iface})")
+                self.log.log("INFO", f"OpenVPN подключен ({detected_iface})")
 
                 # Extra routes/DNS from TOML (beyond what .ovpn pushes)
                 self.add_routes()
@@ -93,18 +126,7 @@ class OpenVPNPlugin(TunnelPlugin):
                 return VPNResult(ok=True, pid=pid)
 
         # --- Failed ---
-        ui.fail("OpenVPN не подключился")
-        self.log.log("ERROR", f"OpenVPN не подключился за {cfg.timeouts.openvpn_init}с")
-
-        # Show error details
-        r = proc.run(["tail", "-20", str(log_path)], sudo=True)
-        if r.stdout.strip():
-            self.log.log_lines("ERROR", r.stdout)
-            tail_lines = r.stdout.strip().splitlines()[-5:]
-            ui.show_log_tail("Лог OpenVPN:", tail_lines, f"sudo cat {log_path}")
-        else:
-            print(f"  {ui.YELLOW}└─{ui.NC} Лог пуст. {ui.DIM}sudo cat {log_path}{ui.NC}")
-
+        _show_error(pid, log_path, self.log)
         return VPNResult(ok=False)
 
     def _kill_by_pattern(self) -> None:

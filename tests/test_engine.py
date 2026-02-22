@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -17,7 +18,7 @@ from tv.checks import CheckResult
 # =========================================================================
 
 @pytest.fixture
-def v3_defs():
+def v3_defs(tmp_dir):
     """Minimal v3 defs with two tunnels for Engine tests."""
     return {
         "tunnels": {
@@ -25,14 +26,12 @@ def v3_defs():
                 "type": "openvpn",
                 "order": 1,
                 "config_file": "client.ovpn",
-                "log": "/tmp/test-ovpn.log",
                 "routes": {"networks": ["0.0.0.0/0"]},
             },
             "singbox": {
                 "type": "singbox",
                 "order": 2,
                 "config_file": "singbox.json",
-                "log": "/tmp/test-sb.log",
                 "interface": "utun99",
                 "routes": {"networks": ["172.18.0.0/16"]},
             },
@@ -54,9 +53,8 @@ def engine(tmp_dir, v3_defs, mock_net, logger):
 
 @pytest.fixture
 def _skip_setup_io():
-    """Patch out disconnect.run and time.sleep used during engine.setup()."""
-    with patch("tv.engine.disconnect.run"), \
-         patch("tv.engine.time.sleep"):
+    """Patch out time.sleep used during engine.setup()."""
+    with patch("tv.engine.time.sleep"):
         yield
 
 
@@ -164,7 +162,7 @@ class TestPrepare:
                         "login": "u", "pass": "p",
                         "cert_mode": "manual", "trusted_cert": "abc",
                     },
-                    "routes": {"targets": ["10.0.0.0/8", "*.corp.local"]},
+                    "routes": {"targets": ["10.0.0.0/8", "*.alpha.local"]},
                     "dns": {"nameservers": ["10.0.1.1"]},
                 },
             },
@@ -192,17 +190,109 @@ class TestPrepare:
         mock_wiz.assert_called_once_with("openvpn")
         assert "10.0.0.0/8" in e.tunnels[0].routes["networks"]
 
+    def test_prepare_quiet_with_settings(self, tmp_dir, mock_net, logger, capsys):
+        """Settings file exists + setup=False: quiet mode, no wizard, profiles shown."""
+        defs = {
+            "tunnels": {
+                "openvpn": {"type": "openvpn", "order": 1, "config_file": "client.ovpn"},
+            },
+        }
+        settings = {"openvpn": {"config_file": "client.ovpn", "targets": []}}
+        (tmp_dir / ".vpn-settings.json").write_text(json.dumps(settings))
+
+        e = Engine(tmp_dir, defs, net=mock_net, log=logger)
+        with patch("tv.ui.wizard_targets") as mock_wiz:
+            e.prepare(setup=False)
+
+        mock_wiz.assert_not_called()
+        assert len(e.tunnels) == 1
+        out = capsys.readouterr().out
+        assert "Профили:" in out
+        assert "openvpn" in out
+
+    def test_prepare_setup_forces_wizard(self, tmp_dir, mock_net, logger):
+        """--setup flag: wizard runs even with settings file."""
+        defs = {
+            "tunnels": {
+                "openvpn": {"type": "openvpn", "order": 1, "config_file": "client.ovpn"},
+            },
+        }
+        settings = {"openvpn": {"config_file": "client.ovpn"}}
+        (tmp_dir / ".vpn-settings.json").write_text(json.dumps(settings))
+
+        e = Engine(tmp_dir, defs, net=mock_net, log=logger)
+        with patch("tv.ui.wizard_targets", return_value=[]) as mock_wiz:
+            e.prepare(setup=True)
+
+        mock_wiz.assert_called_once()
+
+    def test_prepare_no_settings_triggers_wizard(self, tmp_dir, mock_net, logger):
+        """No settings file + setup=False: wizard runs (first-time use)."""
+        defs = {
+            "tunnels": {
+                "openvpn": {"type": "openvpn", "order": 1, "config_file": "client.ovpn"},
+            },
+        }
+        e = Engine(tmp_dir, defs, net=mock_net, log=logger)
+        with patch("tv.ui.wizard_targets", return_value=[]) as mock_wiz:
+            e.prepare(setup=False)
+
+        mock_wiz.assert_called_once()
+
+    def test_prepare_auto_setup_on_missing_param(self, tmp_dir, mock_net, logger):
+        """Settings file exists but missing required param -> auto-enter setup."""
+        defs = {
+            "tunnels": {
+                "forti": {
+                    "type": "fortivpn", "order": 1,
+                    # No auth at all - login/pass/host missing
+                },
+            },
+        }
+        # Create settings file (triggers quiet mode) but with incomplete data
+        (tmp_dir / ".vpn-settings.json").write_text(json.dumps({"forti": {}}))
+
+        e = Engine(tmp_dir, defs, net=mock_net, log=logger)
+        # Should auto-switch to wizard mode (setup=True) instead of crashing
+        with patch("tv.config._resolve_param") as mock_resolve, \
+             patch("tv.ui.wizard_targets", return_value=[]):
+            # First call (quiet): raises SetupRequiredError
+            # Second call (wizard): returns values
+            from tv.config import SetupRequiredError
+            mock_resolve.side_effect = [
+                SetupRequiredError("missing"),  # quiet mode -> triggers auto-setup
+                "vpn.com",   # host (wizard)
+                "443",       # port (wizard)
+                "user",      # login (wizard)
+                "secret",    # pass (wizard)
+                "auto",      # cert_mode (wizard)
+            ]
+            with patch("tv.config._handle_forti_cert"):
+                e.prepare(setup=False)
+
+        # Should have tunnels populated (auto-setup succeeded)
+        assert len(e.tunnels) == 1
+
 
 # =========================================================================
 # Setup
 # =========================================================================
 
 class TestSetup:
-    def test_calls_disconnect_and_ipv6(self, engine):
-        engine.tunnels = []  # no log files to clean
+    def test_no_disconnect_without_clear(self, engine):
+        engine.tunnels = []
         with patch("tv.engine.disconnect.run") as mock_disc, \
              patch("tv.engine.time.sleep"):
             engine.setup()
+
+        mock_disc.assert_not_called()
+        engine.net.disable_ipv6.assert_called_once()
+
+    def test_calls_disconnect_with_clear(self, engine):
+        engine.tunnels = []
+        with patch("tv.engine.disconnect.run") as mock_disc, \
+             patch("tv.engine.time.sleep"):
+            engine.setup(clear=True)
 
         mock_disc.assert_called_once_with(engine.net, engine.log, engine.defs)
         engine.net.disable_ipv6.assert_called_once()
@@ -217,16 +307,18 @@ class TestSetup:
         engine.net.resolve_host.assert_called_with("vpn.test.com")
         engine.net.add_host_route.assert_any_call("1.2.3.4", "192.168.1.1")
 
-    def test_cleans_log_files(self, engine, tmp_dir, _skip_setup_io):
+    def test_prepares_log_files(self, engine, tmp_dir, _skip_setup_io):
+        log_path = tmp_dir / "logs" / "test.log"
         engine.tunnels = [
-            TunnelConfig(name="t", log=str(tmp_dir / "test.log")),
+            TunnelConfig(name="t", log=str(log_path)),
         ]
-        with patch("tv.engine.proc.run") as mock_proc:
-            engine.setup()
-
-        mock_proc.assert_called_once()
-        args = mock_proc.call_args[0][0]
-        assert "rm" in args
+        engine.setup()
+        assert log_path.exists()
+        assert log_path.read_bytes() == b""
+        # File should be readable (0o644)
+        import stat
+        mode = log_path.stat().st_mode & 0o777
+        assert mode & 0o444 == 0o444  # readable by all
 
     def test_no_gateway_skips_routes(self, engine, _skip_setup_io):
         engine.tunnels = []

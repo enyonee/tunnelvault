@@ -21,6 +21,7 @@ import traceback
 from pathlib import Path
 
 from tv import config, ui, disconnect
+from tv.config import SetupRequiredError
 from tv import defaults as defaults_mod
 from tv.app_config import cfg
 from tv.engine import Engine
@@ -83,8 +84,8 @@ def main() -> None:
     engine.log.log("INFO", f"Командная строка: {' '.join(sys.argv)}")
     engine.log.log_env(engine.net, script_dir)
 
-    engine.prepare()
-    engine.setup()
+    engine.prepare(setup=args.setup)
+    engine.setup(clear=args.clear)
     engine.connect_all()
     check_results, ext_ip = engine.check_all()
 
@@ -142,6 +143,9 @@ def _crash_diagnostics(log: Logger | None, exc: BaseException) -> None:
 if __name__ == "__main__":
     try:
         main()
+    except SetupRequiredError as e:
+        print(f"\n  {ui.RED}❌ {e}{ui.NC}", file=sys.stderr)
+        sys.exit(1)
     except SystemExit:
         raise
     except BaseException as e:

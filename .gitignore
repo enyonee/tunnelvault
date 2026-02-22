@@ -26,6 +26,10 @@ __pycache__/
 # Logs
 tunnelvault.log
 *.log
+logs/
+
+# Claude Code
+.claude/
 
 # pytest
 .pytest_cache/

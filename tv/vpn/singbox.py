@@ -93,23 +93,13 @@ def _show_error(sb_proc, log_path: Path, log: Logger) -> None:
 
     pid = sb_proc.pid
     if proc.is_alive(pid):
-        print(f"  {ui.YELLOW}├─{ui.NC} Процесс жив (PID={pid}), но интерфейс не появился")
+        details = [("", f"Процесс жив (PID={pid}), но интерфейс не появился")]
         log.log("WARN", f"Процесс sing-box PID={pid} жив, но интерфейс не появился")
     else:
         rc = sb_proc.poll()
         rc_display = rc if rc is not None else "?"
-        print(f"  {ui.RED}├─{ui.NC} Процесс завершился с кодом: {ui.RED}{ui.BOLD}{rc_display}{ui.NC}")
+        details = [("", f"Процесс завершился с кодом: {rc_display}")]
         log.log("ERROR", f"Процесс sing-box завершился с кодом {rc}")
 
-    try:
-        content = log_path.read_text()
-        if content.strip():
-            log.log_lines("ERROR", content)
-            tail = content.strip().splitlines()[-10:]
-            ui.show_log_tail("Лог sing-box:", tail, f"cat {log_path}")
-        else:
-            print(f"  {ui.YELLOW}├─{ui.NC} Лог пуст")
-            print(f"  {ui.YELLOW}└─{ui.NC} Полный лог: {ui.DIM}cat {log_path}{ui.NC}")
-    except OSError:
-        print(f"  {ui.YELLOW}├─{ui.NC} Лог недоступен")
-        print(f"  {ui.YELLOW}└─{ui.NC} Полный лог: {ui.DIM}cat {log_path}{ui.NC}")
+    details.append(("", f"Лог: {log_path}"))
+    ui.error_tree(details)

@@ -47,15 +47,15 @@ class TestLoadDefaults:
         """Inline table arrays are parsed."""
         toml = tmp_path / "defaults.toml"
         toml.write_text(
-            '[tunnels.corp]\n'
+            '[tunnels.vpn1]\n'
             'type = "fortivpn"\n'
             '\n'
-            '[tunnels.corp.checks]\n'
+            '[tunnels.vpn1.checks]\n'
             'ports = [{host = "1.2.3.4", port = 80}]\n'
         )
         data = load(tmp_path)
-        assert data["tunnels"]["corp"]["checks"]["ports"][0]["host"] == "1.2.3.4"
-        assert data["tunnels"]["corp"]["checks"]["ports"][0]["port"] == 80
+        assert data["tunnels"]["vpn1"]["checks"]["ports"][0]["host"] == "1.2.3.4"
+        assert data["tunnels"]["vpn1"]["checks"]["ports"][0]["port"] == 80
 
 
 # =========================================================================
@@ -96,15 +96,15 @@ class TestLoadDefaultsInverse:
 
 class TestParseTunnelsAutoLog:
     def test_auto_log_path_generated(self):
-        """Tunnel without explicit log gets /tmp/{type}-{name}.log."""
-        defs = {"tunnels": {"office": {"type": "fortivpn", "order": 1}}}
+        """Tunnel without explicit log gets logs/{type}-{name}.log."""
+        defs = {"tunnels": {"forti1": {"type": "fortivpn", "order": 1}}}
         tunnels = parse_tunnels(defs)
         assert len(tunnels) == 1
-        assert tunnels[0].log == "/tmp/fortivpn-office.log"
+        assert tunnels[0].log == "logs/fortivpn-forti1.log"
 
     def test_explicit_log_preserved(self):
         """Tunnel with explicit log keeps it."""
-        defs = {"tunnels": {"office": {
+        defs = {"tunnels": {"forti1": {
             "type": "fortivpn", "order": 1,
             "log": "/var/log/my.log",
         }}}
@@ -114,14 +114,14 @@ class TestParseTunnelsAutoLog:
     def test_two_tunnels_get_unique_logs(self):
         """Two same-type tunnels get different auto-generated log paths."""
         defs = {"tunnels": {
-            "office": {"type": "fortivpn", "order": 1},
+            "forti1": {"type": "fortivpn", "order": 1},
             "home": {"type": "fortivpn", "order": 2},
         }}
         tunnels = parse_tunnels(defs)
         logs = [t.log for t in tunnels]
         assert len(set(logs)) == 2
-        assert "/tmp/fortivpn-office.log" in logs
-        assert "/tmp/fortivpn-home.log" in logs
+        assert "logs/fortivpn-forti1.log" in logs
+        assert "logs/fortivpn-home.log" in logs
 
     def test_disabled_tunnels_excluded(self):
         """Disabled tunnels are filtered out."""

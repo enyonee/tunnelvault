@@ -47,13 +47,14 @@ def mock_net() -> MagicMock:
     net.add_host_route.return_value = True
     net.add_net_route.return_value = True
     net.add_iface_route.return_value = True
-    net.setup_dns_resolver.return_value = {"corp.local": True, "internal.local": True}
+    net.setup_dns_resolver.return_value = {"alpha.local": True, "bravo.local": True}
     net.disable_ipv6.return_value = True
     net.restore_ipv6.return_value = True
     net.delete_host_route.return_value = True
     net.delete_net_route.return_value = True
     net.route_table.return_value = "default via 192.168.1.1 dev en0"
     net.iface_info.return_value = ""
+    net.ppp_peer.return_value = ""
     net.resolve_host.return_value = ["1.2.3.4"]
     net.cleanup_dns_resolver.return_value = None
     return net

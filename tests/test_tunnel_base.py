@@ -37,7 +37,7 @@ class TestTunnelConfig:
             order=2,
             routes={"networks": ["10.0.0.0/8"]},
             dns={"nameservers": ["10.0.1.1"]},
-            auth={"host": "vpn.example.com"},
+            auth={"host": "vpn.test.local"},
         )
         assert tc.name == "fortivpn"
         assert tc.type == "fortivpn"
@@ -77,7 +77,7 @@ def dummy_plugin(tmp_path, mock_net):
         name="test",
         type="dummy",
         routes={"hosts": ["1.2.3.4"], "networks": ["10.0.0.0/8"]},
-        dns={"nameservers": ["10.0.1.1"], "domains": ["corp.local"]},
+        dns={"nameservers": ["10.0.1.1"], "domains": ["alpha.local"]},
         interface="",
     )
     log = Logger(tmp_path / "test.log")
@@ -139,18 +139,18 @@ class TestTunnelPluginABC:
     def test_setup_dns(self, dummy_plugin):
         dummy_plugin.setup_dns()
         dummy_plugin.net.setup_dns_resolver.assert_called_once_with(
-            ["corp.local"], ["10.0.1.1"], "",
+            ["alpha.local"], ["10.0.1.1"], "",
         )
 
     def test_setup_dns_passes_interface(self, make_dummy, mock_net):
         """Interface from cfg is passed to net.setup_dns_resolver."""
         p = make_dummy(
             name="vpn", type="dummy", interface="tun0",
-            dns={"nameservers": ["10.0.1.1"], "domains": ["corp.local"]},
+            dns={"nameservers": ["10.0.1.1"], "domains": ["alpha.local"]},
         )
         p.setup_dns()
         mock_net.setup_dns_resolver.assert_called_once_with(
-            ["corp.local"], ["10.0.1.1"], "tun0",
+            ["alpha.local"], ["10.0.1.1"], "tun0",
         )
 
     def test_setup_dns_empty(self, make_dummy, mock_net):
@@ -160,16 +160,16 @@ class TestTunnelPluginABC:
 
     def test_cleanup_dns(self, dummy_plugin):
         dummy_plugin.cleanup_dns()
-        dummy_plugin.net.cleanup_dns_resolver.assert_called_once_with(["corp.local"], "")
+        dummy_plugin.net.cleanup_dns_resolver.assert_called_once_with(["alpha.local"], "")
 
     def test_cleanup_dns_passes_interface(self, make_dummy, mock_net):
         """Interface from cfg is passed to net.cleanup_dns_resolver."""
         p = make_dummy(
             name="vpn", type="dummy", interface="tun0",
-            dns={"nameservers": ["10.0.1.1"], "domains": ["corp.local"]},
+            dns={"nameservers": ["10.0.1.1"], "domains": ["alpha.local"]},
         )
         p.cleanup_dns()
-        mock_net.cleanup_dns_resolver.assert_called_once_with(["corp.local"], "tun0")
+        mock_net.cleanup_dns_resolver.assert_called_once_with(["alpha.local"], "tun0")
 
     def test_delete_routes(self, dummy_plugin):
         dummy_plugin.delete_routes()
@@ -178,18 +178,21 @@ class TestTunnelPluginABC:
 
     def test_default_log_path_from_cfg(self, make_dummy):
         """_default_log_path uses cfg.log when set."""
-        p = make_dummy(name="test", type="dummy", log="/tmp/my.log")
-        assert p._default_log_path() == Path("/tmp/my.log")
+        p = make_dummy(name="test", type="dummy", log="/var/log/my.log")
+        assert p._default_log_path() == Path("/var/log/my.log")
 
     def test_default_log_path_auto_generated(self, make_dummy):
         """_default_log_path generates from type and name when cfg.log is empty."""
-        p = make_dummy(name="office", type="fortivpn")
-        assert p._default_log_path() == Path("/tmp/fortivpn-office.log")
+        p = make_dummy(name="forti1", type="fortivpn")
+        # log_dir default is "logs" (relative), resolved against script_dir
+        expected = p.script_dir / "logs" / "fortivpn-forti1.log"
+        assert p._default_log_path() == expected
 
     def test_default_log_path_fallback_to_type(self, make_dummy):
         """_default_log_path uses type when name is empty."""
         p = make_dummy(name="", type="openvpn")
-        assert p._default_log_path() == Path("/tmp/openvpn-openvpn.log")
+        expected = p.script_dir / "logs" / "openvpn-openvpn.log"
+        assert p._default_log_path() == expected
 
     def test_pid_initialized_to_none(self, dummy_plugin):
         """_pid defaults to None."""

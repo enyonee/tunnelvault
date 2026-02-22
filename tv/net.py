@@ -71,6 +71,11 @@ class NetManager(ABC):
     @abstractmethod
     def iface_info(self, name: str) -> str: ...
 
+    @abstractmethod
+    def ppp_peer(self, name: str) -> str:
+        """Get PPP peer (gateway) address for a point-to-point interface."""
+        ...
+
     def resolve_host(self, hostname: str) -> list[str]:
         """Resolve hostname to IPs (dig -> host -> getent fallback)."""
         if shutil.which("dig"):
@@ -223,6 +228,20 @@ class DarwinNet(NetManager):
         r = _run(["ifconfig", name])
         return r.stdout if r.returncode == 0 else ""
 
+    def ppp_peer(self, name: str) -> str:
+        r = _run(["ifconfig", name])
+        if r.returncode != 0:
+            return ""
+        for line in r.stdout.splitlines():
+            if "inet " in line:
+                parts = line.split()
+                # macOS: inet X.X.X.X --> Y.Y.Y.Y
+                if "-->" in parts:
+                    idx = parts.index("-->")
+                    if idx + 1 < len(parts):
+                        return parts[idx + 1]
+        return ""
+
 
 # ---------------------------------------------------------------------------
 # Linux
@@ -325,6 +344,21 @@ class LinuxNet(NetManager):
             return r.stdout
         r = _run(["ifconfig", name])
         return r.stdout if r.returncode == 0 else ""
+
+    def ppp_peer(self, name: str) -> str:
+        # ip addr: "inet 10.0.0.2 peer 10.0.0.1/32 scope global ppp0"
+        r = _run(["ip", "addr", "show", name])
+        if r.returncode == 0:
+            m = re.search(r"peer (\d+\.\d+\.\d+\.\d+)", r.stdout)
+            if m:
+                return m.group(1)
+        # Fallback: ifconfig "P-t-P:X.X.X.X"
+        r = _run(["ifconfig", name])
+        if r.returncode == 0:
+            m = re.search(r"P-t-P:(\d+\.\d+\.\d+\.\d+)", r.stdout)
+            if m:
+                return m.group(1)
+        return ""
 
 
 # ---------------------------------------------------------------------------

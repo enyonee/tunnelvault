@@ -69,18 +69,6 @@ def error_tree(lines: list[tuple[str, str]]) -> None:
         print(f"  {YELLOW}{connector}{NC} {msg}")
 
 
-def show_log_tail(title: str, log_lines: list[str], hint: str = "") -> None:
-    """Show log excerpt to user."""
-    if log_lines:
-        print(f"  {YELLOW}├─{NC} {title}")
-        for line in log_lines:
-            print(f"     │ {line}")
-    else:
-        print(f"  {YELLOW}├─{NC} Лог пуст")
-    if hint:
-        print(f"  {YELLOW}└─{NC} Полный лог: {DIM}{hint}{NC}")
-
-
 # --- Interactive input ---
 
 def wizard_input(label: str, default: str = "", secret: bool = False) -> str:
@@ -110,12 +98,13 @@ def wizard_targets(tunnel_name: str) -> list[str]:
     from tv.routing import validate_target
 
     section(f"Маршруты: {tunnel_name}")
-    print(f"  Хосты и сети через этот туннель {DIM}(через запятую, пусто = пропуск){NC}")
+    print(f"  Хосты и сети через этот туннель {DIM}(через запятую){NC}")
+    print(f"  {DIM}Пусто = нативный роутинг (VPN сам решает маршруты){NC}")
     print(f"  {DIM}Форматы:{NC}")
     print(f"  {DIM}  10.0.0.0/8        - подсеть (CIDR){NC}")
     print(f"  {DIM}  192.168.1.1       - IP-адрес{NC}")
-    print(f"  {DIM}  *.corp.local      - домен (wildcard → DNS){NC}")
-    print(f"  {DIM}  git.example.com   - хост (резолв при подключении){NC}")
+    print(f"  {DIM}  *.internal.lan    - домен (wildcard → DNS){NC}")
+    print(f"  {DIM}  git.myhost.com   - хост (резолв при подключении){NC}")
 
     while True:
         raw = wizard_input("Targets")

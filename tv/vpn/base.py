@@ -115,7 +115,10 @@ class TunnelPlugin(ABC):
         if self.cfg.log:
             return Path(self.cfg.log)
         name = self.cfg.name or self.cfg.type
-        return Path(f"{cfg.paths.log_dir}/{self.cfg.type}-{name}.log")
+        log_dir = Path(cfg.paths.log_dir)
+        if not log_dir.is_absolute():
+            log_dir = self.script_dir / log_dir
+        return log_dir / f"{self.cfg.type}-{name}.log"
 
     def _kill_by_pid(self) -> bool:
         """Kill process by PID with timeout. Returns True if killed."""

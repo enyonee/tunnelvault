@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -26,11 +25,8 @@ def _singbox_connect_ok(plugin):
 
 
 @contextlib.contextmanager
-def _singbox_connect_fail(plugin, log_text="", poll=1, is_alive=False, write_log=True):
+def _singbox_connect_fail(plugin, poll=1, is_alive=False):
     """Set up failing sing-box connect: popen(pid=5555), wait_for=False."""
-    if write_log:
-        sb_log = Path(plugin.cfg.log)
-        sb_log.write_text(log_text)
     mock_popen = MagicMock()
     mock_popen.pid = 5555
     mock_popen.poll.return_value = poll
@@ -103,12 +99,12 @@ class TestConnectSuccess:
 
     def test_sets_up_dns_from_config(self, plugin):
         """DNS resolver set up from TunnelConfig.dns."""
-        plugin.cfg.dns = {"nameservers": ["10.0.1.1"], "domains": ["corp.local"]}
+        plugin.cfg.dns = {"nameservers": ["10.0.1.1"], "domains": ["alpha.local"]}
         with _singbox_connect_ok(plugin):
             plugin.connect()
 
         plugin.net.setup_dns_resolver.assert_called_once_with(
-            ["corp.local"], ["10.0.1.1"], "utun99",
+            ["alpha.local"], ["10.0.1.1"], "utun99",
         )
 
     def test_no_dns_when_not_configured(self, plugin):
@@ -135,7 +131,7 @@ class TestConnectSuccess:
 class TestConnectFailure:
     def test_interface_timeout(self, plugin, capsys):
         """Интерфейс не появляется за 15с -> fail."""
-        with _singbox_connect_fail(plugin, "ERROR: bind failed\n"):
+        with _singbox_connect_fail(plugin):
             r = plugin.connect()
 
         assert r.ok is False
@@ -143,7 +139,7 @@ class TestConnectFailure:
 
     def test_process_alive_but_no_interface(self, plugin, capsys):
         """Процесс жив, но интерфейс не появился."""
-        with _singbox_connect_fail(plugin, "starting...\n", is_alive=True):
+        with _singbox_connect_fail(plugin, is_alive=True):
             r = plugin.connect()
 
         assert r.ok is False
@@ -152,32 +148,20 @@ class TestConnectFailure:
 
     def test_poll_none_shows_question_mark(self, plugin, capsys):
         """poll() возвращает None - показываем '?'."""
-        with _singbox_connect_fail(plugin, "something\n", poll=None):
+        with _singbox_connect_fail(plugin, poll=None):
             plugin.connect()
 
         out = capsys.readouterr().out
         assert "?" in out
         assert "None" not in out
 
-    def test_empty_log_on_failure(self, plugin, capsys):
-        """Лог пуст при ошибке - не падает."""
+    def test_shows_log_hint(self, plugin, capsys):
+        """При ошибке показывает путь к логу."""
         with _singbox_connect_fail(plugin):
-            r = plugin.connect()
+            plugin.connect()
 
-        assert r.ok is False
         out = capsys.readouterr().out
-        assert "Лог пуст" in out
-
-    def test_log_file_unreadable(self, plugin, capsys):
-        """Файл лога недоступен (OSError) - не крашится."""
-        plugin.cfg.log = str(Path(plugin.cfg.log).parent / "nonexistent" / "singbox.log")
-
-        with _singbox_connect_fail(plugin, write_log=False):
-            r = plugin.connect()
-
-        assert r.ok is False
-        out = capsys.readouterr().out
-        assert "Лог недоступен" in out
+        assert "sing-box.log" in out
 
 
 # =========================================================================

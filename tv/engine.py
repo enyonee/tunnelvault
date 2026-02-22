@@ -40,7 +40,11 @@ class Engine:
         self.script_dir = script_dir
         self.defs = defs
         self.net = net or create_net()
-        self.log = log or Logger(script_dir / cfg.paths.main_log, debug=debug)
+        if log:
+            self.log = log
+        else:
+            log_dir = config.ensure_log_dir(script_dir)
+            self.log = Logger(log_dir / cfg.paths.main_log, debug=debug)
         self.tunnels: list[TunnelConfig] = []
         self.plugins: list[TunnelPlugin] = []
         self.results: list[VPNResult] = []
@@ -63,8 +67,13 @@ class Engine:
 
     # --- Lifecycle ---
 
-    def prepare(self) -> None:
+    def prepare(self, *, setup: bool = False) -> None:
         """Load tunnels, resolve configs, save settings.
+
+        Args:
+            setup: Force interactive wizard mode. When False (default),
+                   runs quietly if settings file exists. Auto-enters setup
+                   if a required param is missing.
 
         Safe to call multiple times (resets state).
         """
@@ -72,34 +81,60 @@ class Engine:
         self.plugins = []
         self.results = []
         self.tunnels = defaults_mod.parse_tunnels(self.defs)
-        saved = config.load_settings(self.script_dir)
-        print()
+        config.resolve_log_paths(self.tunnels, self.script_dir)
+
+        settings_path = self.script_dir / cfg.paths.settings_file
+        quiet = not setup and settings_path.exists()
+
+        saved = config.load_settings(self.script_dir, quiet=quiet)
+        if not quiet:
+            print()
 
         for tcfg in self.tunnels:
             plugin_cls = get_plugin(tcfg.type)
             schema = plugin_cls.config_schema()
             if schema:
-                ui.section(f"Параметры: {tcfg.name}")
-                print()
-                config.resolve_tunnel_params(tcfg, plugin_cls, saved, self.script_dir)
-                print()
+                if not quiet:
+                    ui.section(f"Параметры: {tcfg.name}")
+                    print()
+                try:
+                    config.resolve_tunnel_params(
+                        tcfg, plugin_cls, saved, self.script_dir, quiet=quiet,
+                    )
+                except config.SetupRequiredError:
+                    if not quiet:
+                        raise
+                    ui.warn("Настройки неполные, запускаю wizard...")
+                    return self.prepare(setup=True)
+                if not quiet:
+                    print()
 
             # Resolve routes (targets → networks/hosts/dns)
-            config.resolve_tunnel_routes(tcfg, saved)
+            config.resolve_tunnel_routes(tcfg, saved, quiet=quiet)
 
         # Validate config_file uniqueness after resolution
         # (ENV/saved may have overridden auto-applied defaults)
         defaults_mod.validate_config_files(self.tunnels)
 
-        config.save_tunnel_settings(self.tunnels, self.script_dir)
-        print()
+        if quiet:
+            names = [t.name for t in self.tunnels]
+            ui.info(f"📋 Профили: {ui.BOLD}{', '.join(names)}{ui.NC}")
+        else:
+            config.save_tunnel_settings(self.tunnels, self.script_dir)
+            print()
 
-    def setup(self) -> None:
-        """Pre-connection setup: cleanup, IPv6, VPN server routes, clean logs."""
-        ui.info("🧹 Отключаю предыдущие подключения...")
-        self.log.log("INFO", "--- Очистка предыдущих подключений ---")
-        disconnect.run(self.net, self.log, self.defs)
-        time.sleep(cfg.timeouts.cleanup_sleep)
+    def setup(self, *, clear: bool = False) -> None:
+        """Pre-connection setup: optional cleanup, IPv6, VPN server routes, clean logs.
+
+        Args:
+            clear: If True, kill all previous VPN connections before starting.
+                   If False (default), leave existing connections untouched.
+        """
+        if clear:
+            ui.info("🧹 Отключаю предыдущие подключения...")
+            self.log.log("INFO", "--- Очистка предыдущих подключений ---")
+            disconnect.run(self.net, self.log, self.defs)
+            time.sleep(cfg.timeouts.cleanup_sleep)
 
         ui.info("🌐 Отключаю IPv6...")
         self.log.log("INFO", "--- Отключение IPv6 ---")
@@ -111,11 +146,9 @@ class Engine:
 
         self._setup_vpn_server_routes()
 
-        # Clean old log files
-        log_files = [Path(t.log) for t in self.tunnels if t.log]
-        if log_files:
-            proc.run(["rm", "-f"] + [str(f) for f in log_files], sudo=True)
-            self.log.log("INFO", "Логи VPN очищены")
+        # Pre-create log files with correct ownership (readable without sudo)
+        config.prepare_log_files(self.tunnels)
+        self.log.log("INFO", "Логи VPN подготовлены")
 
     def connect_all(self) -> None:
         """Connect all tunnels sequentially.

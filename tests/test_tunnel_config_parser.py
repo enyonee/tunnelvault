@@ -71,7 +71,7 @@ class TestParseTunnels:
                 "forti": {
                     "type": "fortivpn",
                     "routes": {"networks": ["10.0.0.0/8"]},
-                    "dns": {"nameservers": ["10.0.1.1"], "domains": ["corp.local"]},
+                    "dns": {"nameservers": ["10.0.1.1"], "domains": ["alpha.local"]},
                 },
             },
         }
@@ -84,12 +84,12 @@ class TestParseTunnels:
             "tunnels": {
                 "forti": {
                     "type": "fortivpn",
-                    "auth": {"host": "vpn.example.com", "port": "44333"},
+                    "auth": {"host": "vpn.test.local", "port": "44333"},
                 },
             },
         }
         t = parse_tunnels(defs)[0]
-        assert t.auth["host"] == "vpn.example.com"
+        assert t.auth["host"] == "vpn.test.local"
 
     def test_checks_section(self):
         defs = {

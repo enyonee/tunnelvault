@@ -13,16 +13,35 @@ from tv.vpn.base import TunnelConfig
 from tv.vpn.openvpn import OpenVPNPlugin
 
 
+def _setup_mock_net_tun(mock_net):
+    """Configure mock_net.interfaces() to simulate utun9 appearing after connect.
+
+    First call returns {en0, lo0} (before snapshot).
+    Subsequent calls return {en0, lo0, utun9} (after connect).
+    """
+    call_count = 0
+    ifaces_before = {"en0": "192.168.1.7", "lo0": "127.0.0.1"}
+    ifaces_after = {"en0": "192.168.1.7", "lo0": "127.0.0.1", "utun9": "10.8.0.2"}
+
+    def _interfaces():
+        nonlocal call_count
+        call_count += 1
+        return ifaces_before if call_count == 1 else ifaces_after
+
+    mock_net.interfaces.side_effect = _interfaces
+
+
 @contextlib.contextmanager
 def _openvpn_connect_ok(plugin, pids=None):
-    """Set up successful OpenVPN connect: no Tunnelblick, PID found, init ok."""
+    """Set up successful OpenVPN connect: no Tunnelblick, PID found, tun detected."""
     if pids is None:
         pids = [[], [12345]]
+    _setup_mock_net_tun(plugin.net)
     with patch("tv.vpn.openvpn.proc") as mock_proc, \
          patch("tv.vpn.openvpn.time.sleep"):
         mock_proc.find_pids.side_effect = pids
         mock_proc.run.return_value = subprocess.CompletedProcess([], 0, "", "")
-        mock_proc.wait_for.return_value = True
+        mock_proc.wait_for.side_effect = lambda desc, fn, *a, **kw: fn() or fn()
         yield mock_proc
 
 
@@ -79,13 +98,14 @@ class TestTunnelblickDetection:
 
     def test_tunnelblick_running_without_openvpn(self, plugin):
         """Tunnelblick запущен, но его openvpn нет - запускаем свой."""
+        _setup_mock_net_tun(plugin.net)
         with patch("tv.vpn.openvpn.proc") as mock_proc, \
              patch("tv.vpn.openvpn.time.sleep"):
             # 1) Tunnelblick? [111]  2) Tunnelblick.*openvpn? []
             # 3) openvpn --config ... ? [12345]
             mock_proc.find_pids.side_effect = [[111], [], [12345]]
             mock_proc.run.return_value = subprocess.CompletedProcess([], 0, "", "")
-            mock_proc.wait_for.return_value = True
+            mock_proc.wait_for.side_effect = lambda desc, fn, *a, **kw: fn() or fn()
 
             r = plugin.connect()
 
@@ -98,12 +118,13 @@ class TestTunnelblickDetection:
 
 class TestConnectSuccess:
     def test_normal_connection(self, plugin):
-        """Нормальный запуск openvpn -> init complete -> ok."""
+        """Нормальный запуск openvpn -> tun detected -> ok."""
         with _openvpn_connect_ok(plugin):
             r = plugin.connect()
 
         assert r.ok is True
         assert r.pid == 12345
+        assert plugin.cfg.interface == "utun9"
 
     def test_applies_routes_from_config(self, plugin):
         """TOML routes applied after successful connection."""
@@ -120,14 +141,14 @@ class TestConnectSuccess:
 
     def test_sets_up_dns_from_config(self, plugin):
         """DNS resolver set up after successful connection."""
-        plugin.cfg.dns = {"nameservers": ["10.0.1.1"], "domains": ["corp.local"]}
+        plugin.cfg.dns = {"nameservers": ["10.0.1.1"], "domains": ["alpha.local"]}
         plugin.cfg.interface = "tun0"
 
         with _openvpn_connect_ok(plugin):
             plugin.connect()
 
         plugin.net.setup_dns_resolver.assert_called_once_with(
-            ["corp.local"], ["10.0.1.1"], "tun0",
+            ["alpha.local"], ["10.0.1.1"], "tun0",
         )
 
     def test_no_routes_when_not_configured(self, plugin):
@@ -177,8 +198,8 @@ class TestConnectFailure:
 
         assert r.ok is False
 
-    def test_init_sequence_timeout(self, plugin, capsys):
-        """PID есть, но init sequence не завершается -> fail."""
+    def test_tun_interface_timeout(self, plugin, capsys):
+        """PID есть, но tun интерфейс не появляется -> fail."""
         ovpn_log = Path(plugin.cfg.log)
         ovpn_log.write_text("")
 
@@ -195,44 +216,48 @@ class TestConnectFailure:
 
         assert r.ok is False
 
-    def test_failure_shows_log_tail(self, plugin, capsys):
-        """При ошибке показывает хвост лога."""
-        ovpn_log = Path(plugin.cfg.log)
-        ovpn_log.write_text("")
-
+    def test_failure_shows_log_hint(self, plugin, capsys):
+        """При ошибке показывает путь к логу."""
         with patch("tv.vpn.openvpn.proc") as mock_proc, \
              patch("tv.vpn.openvpn.time.sleep"):
-            mock_proc.find_pids.side_effect = [[], []]
-            # Первый вызов run - запуск openvpn, второй - tail лога
-            mock_proc.run.side_effect = [
-                subprocess.CompletedProcess([], 0, "", ""),          # openvpn launch
-                subprocess.CompletedProcess([], 0, "TLS Error\n", ""),  # tail log
-            ]
+            mock_proc.find_pids.side_effect = [[], [12345]]
+            mock_proc.run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            mock_proc.wait_for.return_value = False
+            mock_proc.is_alive.return_value = False
 
             r = plugin.connect()
 
         assert r.ok is False
         out = capsys.readouterr().out
-        assert "TLS Error" in out
+        assert "openvpn.log" in out
 
-    def test_failure_empty_log(self, plugin, capsys):
-        """Лог пуст - показываем это."""
-        ovpn_log = Path(plugin.cfg.log)
-        ovpn_log.write_text("")
-
+    def test_failure_no_pid_shows_message(self, plugin, capsys):
+        """PID не найден после запуска - показывает сообщение."""
         with patch("tv.vpn.openvpn.proc") as mock_proc, \
              patch("tv.vpn.openvpn.time.sleep"):
             mock_proc.find_pids.side_effect = [[], []]
-            mock_proc.run.side_effect = [
-                subprocess.CompletedProcess([], 0, "", ""),  # openvpn launch
-                subprocess.CompletedProcess([], 0, "", ""),  # tail -> empty
-            ]
+            mock_proc.run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
             r = plugin.connect()
 
         assert r.ok is False
         out = capsys.readouterr().out
-        assert "Лог пуст" in out
+        assert "PID не найден" in out
+
+    def test_failure_process_alive_shows_pid(self, plugin, capsys):
+        """Процесс жив, но интерфейс не появился."""
+        with patch("tv.vpn.openvpn.proc") as mock_proc, \
+             patch("tv.vpn.openvpn.time.sleep"):
+            mock_proc.find_pids.side_effect = [[], [12345]]
+            mock_proc.run.return_value = subprocess.CompletedProcess([], 0, "", "")
+            mock_proc.wait_for.return_value = False
+            mock_proc.is_alive.return_value = True
+
+            r = plugin.connect()
+
+        assert r.ok is False
+        out = capsys.readouterr().out
+        assert "PID=12345" in out
 
 
 # =========================================================================

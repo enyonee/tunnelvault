@@ -115,6 +115,34 @@ class TestDarwinNetInverse:
         mock_run.return_value = subprocess.CompletedProcess([], 1, "", "")
         assert darwin_net.route_table() == ""
 
+    @patch("subprocess.run")
+    def test_ppp_peer_darwin(self, mock_run, darwin_net):
+        """macOS: парсит inet X.X.X.X --> Y.Y.Y.Y."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            [], 0,
+            "ppp0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500\n"
+            "\tinet 10.0.0.2 --> 10.0.0.1 netmask 0xffffffff\n",
+            "",
+        )
+        assert darwin_net.ppp_peer("ppp0") == "10.0.0.1"
+
+    @patch("subprocess.run")
+    def test_ppp_peer_darwin_no_peer(self, mock_run, darwin_net):
+        """macOS: ifconfig без --> возвращает пустую строку."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            [], 0,
+            "en0: flags=8863<UP,BROADCAST,RUNNING> mtu 1500\n"
+            "\tinet 192.168.1.7 netmask 0xffffff00 broadcast 192.168.1.255\n",
+            "",
+        )
+        assert darwin_net.ppp_peer("en0") == ""
+
+    @patch("subprocess.run")
+    def test_ppp_peer_darwin_iface_down(self, mock_run, darwin_net):
+        """macOS: интерфейс не существует - пустая строка."""
+        mock_run.return_value = subprocess.CompletedProcess([], 1, "", "ifconfig: interface ppp0 does not exist")
+        assert darwin_net.ppp_peer("ppp0") == ""
+
 
 # =========================================================================
 # Positive: resolve_host (common to both platforms)
@@ -318,8 +346,8 @@ class TestLinuxNet:
         """Linux: resolvectl с custom interface (tun0, utun99)."""
         mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
         with patch("shutil.which", return_value="/usr/bin/resolvectl"):
-            results = linux_net.setup_dns_resolver(["corp.local"], ["10.0.1.1"], "tun0")
-        assert results["corp.local"] is True
+            results = linux_net.setup_dns_resolver(["alpha.local"], ["10.0.1.1"], "tun0")
+        assert results["alpha.local"] is True
         # Verify tun0 used instead of ppp0
         link_call = mock_run.call_args_list[0]
         assert link_call[0][0] == ["ip", "link", "show", "tun0"]
@@ -331,7 +359,7 @@ class TestLinuxNet:
         """cleanup_dns_resolver uses custom interface."""
         mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
         with patch("shutil.which", return_value="/usr/bin/resolvectl"):
-            linux_net.cleanup_dns_resolver(["corp.local"], "tun0")
+            linux_net.cleanup_dns_resolver(["alpha.local"], "tun0")
         args = mock_run.call_args[0][0]
         assert "tun0" in args
 
@@ -448,3 +476,46 @@ class TestLinuxNetInverse:
         with patch("shutil.which", return_value="/usr/bin/resolvectl"):
             results = linux_net.setup_dns_resolver(["test.local"], ["10.0.0.1"], "utun99")
         assert results["test.local"] is False
+
+    @patch("subprocess.run")
+    def test_ppp_peer_linux_ip_addr(self, mock_run, linux_net):
+        """Linux: парсит peer из ip addr show."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            [], 0,
+            "4: ppp0: <POINTOPOINT,MULTICAST,NOARP,UP,LOWER_UP>\n"
+            "    inet 10.0.0.2 peer 10.0.0.1/32 scope global ppp0\n",
+            "",
+        )
+        assert linux_net.ppp_peer("ppp0") == "10.0.0.1"
+
+    @patch("subprocess.run")
+    def test_ppp_peer_linux_ifconfig_fallback(self, mock_run, linux_net):
+        """Linux: ip addr не работает - fallback на ifconfig P-t-P."""
+        mock_run.side_effect = [
+            subprocess.CompletedProcess([], 1, "", ""),  # ip addr fails
+            subprocess.CompletedProcess(
+                [], 0,
+                "ppp0 Link encap:Point-to-Point Protocol\n"
+                "inet addr:10.0.0.2  P-t-P:10.0.0.1  Mask:255.255.255.255\n",
+                "",
+            ),
+        ]
+        assert linux_net.ppp_peer("ppp0") == "10.0.0.1"
+
+    @patch("subprocess.run")
+    def test_ppp_peer_linux_no_peer(self, mock_run, linux_net):
+        """Linux: ip addr без peer и ifconfig без P-t-P - пустая строка."""
+        mock_run.side_effect = [
+            subprocess.CompletedProcess([], 0, "2: eth0: <BROADCAST>\n    inet 192.168.1.5/24\n", ""),
+            subprocess.CompletedProcess([], 1, "", ""),
+        ]
+        assert linux_net.ppp_peer("eth0") == ""
+
+    @patch("subprocess.run")
+    def test_ppp_peer_linux_iface_not_found(self, mock_run, linux_net):
+        """Linux: интерфейс не существует - пустая строка."""
+        mock_run.side_effect = [
+            subprocess.CompletedProcess([], 1, "", "Device not found"),
+            subprocess.CompletedProcess([], 1, "", ""),
+        ]
+        assert linux_net.ppp_peer("ppp0") == ""

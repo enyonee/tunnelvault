@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -11,15 +12,21 @@ import pytest
 
 from tv.app_config import cfg
 from tv.config import (
+    SetupRequiredError,
     load_settings,
     save_tunnel_settings,
     resolve_tunnel_params,
     resolve_tunnel_routes,
+    resolve_log_dir,
+    resolve_log_paths,
+    ensure_log_dir,
+    prepare_log_files,
     _resolve_param,
     _migrate_bash_settings,
     _generate_cert,
     _get_param_value,
     _set_param_value,
+    _tunnel_saved,
 )
 
 SETTINGS_FILENAME = cfg.paths.settings_file
@@ -42,13 +49,13 @@ class TestLoadSettings:
     def test_migrates_bash_format(self, tmp_dir: Path):
         bash_content = (
             '# comment\n'
-            'SAVED_FORTI_HOST="vpn.corp.com"\n'
+            'SAVED_FORTI_HOST="vpn.test.local"\n'
             'SAVED_FORTI_PORT="44333"\n'
             'SAVED_FORTI_PASS="s3cret"\n'
         )
         (tmp_dir / ".vpn-settings").write_text(bash_content)
         result = load_settings(tmp_dir)
-        assert result["fortivpn"]["host"] == "vpn.corp.com"
+        assert result["fortivpn"]["host"] == "vpn.test.local"
         assert result["fortivpn"]["pass"] == "s3cret"
 
     def test_returns_empty_when_no_files(self, tmp_dir: Path):
@@ -61,7 +68,7 @@ class TestSaveTunnelSettings:
         tunnels = [
             TunnelConfig(
                 name="fortivpn", type="fortivpn",
-                auth={"host": "vpn.example.com", "port": "44333",
+                auth={"host": "vpn.test.local", "port": "44333",
                        "login": "user", "pass": "secret",
                        "cert_mode": "auto", "trusted_cert": "abc123"},
             ),
@@ -74,7 +81,7 @@ class TestSaveTunnelSettings:
         path = tmp_dir / SETTINGS_FILENAME
         assert path.exists()
         data = json.loads(path.read_text())
-        assert data["fortivpn"]["host"] == "vpn.example.com"
+        assert data["fortivpn"]["host"] == "vpn.test.local"
         assert data["openvpn"]["config_file"] == "client.ovpn"
 
     def test_file_permissions_600(self, tmp_dir: Path):
@@ -95,14 +102,26 @@ class TestSaveTunnelSettings:
         tunnels = [
             TunnelConfig(
                 name="forti", type="fortivpn",
-                routes={"targets": ["*.corp.local", "10.0.0.0/8"]},
+                routes={"targets": ["*.alpha.local", "10.0.0.0/8"]},
                 dns={"nameservers": ["10.0.1.1"]},
             ),
         ]
         save_tunnel_settings(tunnels, tmp_dir)
         data = json.loads((tmp_dir / SETTINGS_FILENAME).read_text())
-        assert data["forti"]["targets"] == ["*.corp.local", "10.0.0.0/8"]
+        assert data["forti"]["targets"] == ["*.alpha.local", "10.0.0.0/8"]
         assert data["forti"]["dns_nameservers"] == ["10.0.1.1"]
+
+    def test_saves_empty_targets_native_routing(self, tmp_dir: Path):
+        """Empty targets (native routing) saved to remember user choice."""
+        tunnels = [
+            TunnelConfig(
+                name="forti", type="fortivpn",
+                routes={"targets": []},
+            ),
+        ]
+        save_tunnel_settings(tunnels, tmp_dir)
+        data = json.loads((tmp_dir / SETTINGS_FILENAME).read_text())
+        assert data["forti"]["targets"] == []
 
 
 # =========================================================================
@@ -110,10 +129,30 @@ class TestSaveTunnelSettings:
 # =========================================================================
 
 class TestLoadSettingsInverse:
-    def test_invalid_json_returns_empty(self, tmp_dir: Path):
+    def test_invalid_json_falls_through_to_bash(self, tmp_dir: Path):
+        """Corrupted JSON + bash file exists -> uses bash file."""
+        (tmp_dir / SETTINGS_FILENAME).write_text("{corrupted json!!")
+        bash = 'SAVED_FORTI_HOST="vpn.com"\nSAVED_FORTI_LOGIN="user"\n'
+        (tmp_dir / ".vpn-settings").write_text(bash)
+        result = load_settings(tmp_dir)
+        assert result["fortivpn"]["host"] == "vpn.com"
+
+    def test_invalid_json_no_bash_returns_empty(self, tmp_dir: Path):
+        """Corrupted JSON + no bash file -> empty dict."""
         (tmp_dir / SETTINGS_FILENAME).write_text("{corrupted json!!")
         result = load_settings(tmp_dir)
         assert result == {}
+
+    def test_unreadable_json_falls_through_to_bash(self, tmp_dir: Path):
+        """JSON exists but unreadable + bash file -> uses bash file."""
+        json_path = tmp_dir / SETTINGS_FILENAME
+        json_path.write_text("{}")
+        json_path.chmod(0o000)
+        bash = 'SAVED_FORTI_HOST="vpn.com"\n'
+        (tmp_dir / ".vpn-settings").write_text(bash)
+        result = load_settings(tmp_dir)
+        json_path.chmod(0o600)  # restore for cleanup
+        assert result["fortivpn"]["host"] == "vpn.com"
 
     def test_empty_file_returns_empty(self, tmp_dir: Path):
         (tmp_dir / SETTINGS_FILENAME).write_text("")
@@ -153,6 +192,33 @@ class TestResolveParam:
 # =========================================================================
 # Negative / inverse: param resolution edge cases
 # =========================================================================
+
+class TestTunnelSavedLookup:
+    """_tunnel_saved: name -> type fallback for saved settings lookup."""
+
+    def test_finds_by_name(self):
+        tc = TunnelConfig(name="forti", type="fortivpn")
+        saved = {"forti": {"login": "user"}}
+        assert _tunnel_saved(saved, tc) == {"login": "user"}
+
+    def test_falls_back_to_type(self):
+        tc = TunnelConfig(name="forti", type="fortivpn")
+        saved = {"fortivpn": {"login": "user"}}
+        assert _tunnel_saved(saved, tc) == {"login": "user"}
+
+    def test_name_takes_priority_over_type(self):
+        tc = TunnelConfig(name="forti", type="fortivpn")
+        saved = {
+            "forti": {"login": "by_name"},
+            "fortivpn": {"login": "by_type"},
+        }
+        assert _tunnel_saved(saved, tc) == {"login": "by_name"}
+
+    def test_empty_when_neither_match(self):
+        tc = TunnelConfig(name="forti", type="fortivpn")
+        saved = {"openvpn": {"config_file": "c.ovpn"}}
+        assert _tunnel_saved(saved, tc) == {}
+
 
 class TestResolveParamInverse:
     def test_env_empty_string_not_treated_as_value(self):
@@ -348,6 +414,20 @@ class TestResolveTunnelParams:
         mock_cert.assert_not_called()
         assert tc.auth["trusted_cert"] == "saved_cert_value"
 
+    def test_saved_found_by_type_when_name_differs(self):
+        """Saved under type key ('fortivpn') found when tunnel name differs ('forti')."""
+        tc = TunnelConfig(name="forti", type="fortivpn")
+        saved = {
+            "fortivpn": {
+                "host": "vpn.com", "port": "443",
+                "login": "user", "pass": "secret",
+                "cert_mode": "manual", "trusted_cert": "abc123",
+            },
+        }
+        resolve_tunnel_params(tc, FortiVPNPlugin, saved, Path("/tmp"))
+        assert tc.auth["host"] == "vpn.com"
+        assert tc.auth["login"] == "user"
+
     def test_migrated_bash_settings_resolve_forti(self):
         """Migrated bash settings (per-tunnel nested) resolve correctly."""
         tc = TunnelConfig(name="fortivpn", type="fortivpn")
@@ -374,13 +454,13 @@ class TestResolveTunnelRoutes:
         """Targets in TOML routes -> parsed into networks/hosts/dns."""
         tc = TunnelConfig(
             name="forti", type="fortivpn",
-            routes={"targets": ["*.corp.local", "10.0.0.0/8", "192.168.1.1"]},
+            routes={"targets": ["*.alpha.local", "10.0.0.0/8", "192.168.1.1"]},
             dns={"nameservers": ["10.0.1.1"]},
         )
         resolve_tunnel_routes(tc, {})
         assert "10.0.0.0/8" in tc.routes["networks"]
         assert "192.168.1.1" in tc.routes["hosts"]
-        assert "corp.local" in tc.dns["domains"]
+        assert "alpha.local" in tc.dns["domains"]
 
     def test_targets_from_saved(self):
         """Targets from saved settings -> parsed."""
@@ -428,28 +508,47 @@ class TestResolveTunnelRoutes:
 
     @patch("tv.ui.wizard_targets", return_value=[])
     def test_empty_wizard_input_noop(self, mock_wizard):
-        """Empty wizard input -> no routes added."""
+        """Empty wizard input -> no routes added, targets=[] saved."""
         tc = TunnelConfig(name="forti", type="fortivpn")
         resolve_tunnel_routes(tc, {})
         assert tc.routes.get("networks") is None
         assert tc.routes.get("hosts") is None
+        assert tc.routes["targets"] == []
+
+    def test_saved_empty_targets_skips_wizard(self):
+        """Saved targets=[] (native routing) -> wizard NOT called."""
+        tc = TunnelConfig(name="forti", type="fortivpn")
+        saved = {"forti": {"targets": []}}
+        with patch("tv.ui.wizard_targets") as mock_wizard:
+            resolve_tunnel_routes(tc, saved)
+        mock_wizard.assert_not_called()
+        assert tc.routes["targets"] == []
+
+    def test_saved_targets_loaded(self):
+        """Saved targets loaded from settings file."""
+        tc = TunnelConfig(name="forti", type="fortivpn")
+        saved = {"forti": {"targets": ["10.0.0.0/8", "192.168.1.0/24"]}}
+        with patch("tv.ui.wizard_targets") as mock_wizard:
+            resolve_tunnel_routes(tc, saved)
+        mock_wizard.assert_not_called()
+        assert "10.0.0.0/8" in tc.routes["networks"]
 
     @patch("tv.ui.wizard_nameservers", return_value=["10.0.1.1"])
     def test_wizard_asks_nameservers_for_wildcards(self, mock_ns):
         """Wildcard targets + no nameservers -> wizard asks for DNS servers."""
         tc = TunnelConfig(
             name="forti", type="fortivpn",
-            routes={"targets": ["*.corp.local", "10.0.0.0/8"]},
+            routes={"targets": ["*.alpha.local", "10.0.0.0/8"]},
         )
         resolve_tunnel_routes(tc, {})
-        mock_ns.assert_called_once_with(["corp.local"])
+        mock_ns.assert_called_once_with(["alpha.local"])
         assert tc.dns["nameservers"] == ["10.0.1.1"]
 
     def test_existing_nameservers_not_overwritten(self):
         """Existing DNS nameservers -> wizard not called."""
         tc = TunnelConfig(
             name="forti", type="fortivpn",
-            routes={"targets": ["*.corp.local"]},
+            routes={"targets": ["*.alpha.local"]},
             dns={"nameservers": ["10.0.1.1"]},
         )
         with patch("tv.ui.wizard_nameservers") as mock_ns:
@@ -459,7 +558,7 @@ class TestResolveTunnelRoutes:
 
     def test_saves_targets_back(self):
         """Original targets stored in routes for saving."""
-        targets = ["*.corp.local", "10.0.0.0/8"]
+        targets = ["*.alpha.local", "10.0.0.0/8"]
         tc = TunnelConfig(
             name="forti", type="fortivpn",
             routes={"targets": targets},
@@ -474,10 +573,10 @@ class TestResolveTunnelRoutes:
         tc = TunnelConfig(
             name="forti", type="fortivpn",
             routes={"networks": ["10.0.0.0/8"]},  # advanced mode
-            dns={"domains": ["corp.local"]},        # domains but no nameservers
+            dns={"domains": ["alpha.local"]},        # domains but no nameservers
         )
         resolve_tunnel_routes(tc, {})
-        mock_ns.assert_called_once_with(["corp.local"])
+        mock_ns.assert_called_once_with(["alpha.local"])
         assert tc.dns["nameservers"] == ["10.0.1.1"]
 
     def test_toml_domains_with_nameservers_no_prompt(self):
@@ -485,7 +584,7 @@ class TestResolveTunnelRoutes:
         tc = TunnelConfig(
             name="forti", type="fortivpn",
             routes={"networks": ["10.0.0.0/8"]},
-            dns={"domains": ["corp.local"], "nameservers": ["10.0.1.1"]},
+            dns={"domains": ["alpha.local"], "nameservers": ["10.0.1.1"]},
         )
         with patch("tv.ui.wizard_nameservers") as mock_ns:
             resolve_tunnel_routes(tc, {})
@@ -546,3 +645,190 @@ class TestSilentParams:
         )
         resolve_tunnel_params(tc, FortiVPNPlugin, {}, Path("/tmp"))
         assert tc.extra["fallback_gateway"] == "10.0.0.1"
+
+
+# =========================================================================
+# Quiet mode (--setup not passed, settings file exists)
+# =========================================================================
+
+class TestResolveParamQuiet:
+    def test_quiet_uses_env(self):
+        """quiet=True: ENV value used without prints."""
+        with patch.dict(os.environ, {"VPN_TEST": "from_env"}):
+            result = _resolve_param("test", env_name="VPN_TEST", quiet=True)
+        assert result == "from_env"
+
+    def test_quiet_uses_saved(self):
+        """quiet=True: saved value used without prints."""
+        result = _resolve_param("test", env_name="NOPE", saved="from_saved", quiet=True)
+        assert result == "from_saved"
+
+    def test_quiet_uses_default(self):
+        """quiet=True: default value used without wizard."""
+        result = _resolve_param("test", env_name="NOPE", default="def_val", quiet=True)
+        assert result == "def_val"
+
+    def test_quiet_raises_on_missing(self):
+        """quiet=True: no value anywhere -> SetupRequiredError."""
+        with pytest.raises(SetupRequiredError, match="--setup"):
+            _resolve_param("Логин", env_name="NOPE", quiet=True)
+
+
+class TestResolveTunnelRoutesQuiet:
+    def test_quiet_skips_wizard(self):
+        """quiet=True: no wizard, defaults to native routing."""
+        tc = TunnelConfig(name="forti", type="fortivpn")
+        with patch("tv.ui.wizard_targets") as mock_wiz:
+            resolve_tunnel_routes(tc, {}, quiet=True)
+        mock_wiz.assert_not_called()
+        assert tc.routes["targets"] == []
+
+    def test_quiet_uses_saved_targets(self):
+        """quiet=True: saved targets resolved without prints."""
+        tc = TunnelConfig(name="forti", type="fortivpn")
+        saved = {"forti": {"targets": ["10.0.0.0/8"]}}
+        resolve_tunnel_routes(tc, saved, quiet=True)
+        assert "10.0.0.0/8" in tc.routes["networks"]
+
+    def test_quiet_uses_toml_routes(self):
+        """quiet=True: TOML networks used without prints."""
+        tc = TunnelConfig(
+            name="forti", type="fortivpn",
+            routes={"networks": ["10.0.0.0/8"]},
+        )
+        resolve_tunnel_routes(tc, {}, quiet=True)
+        assert tc.routes["networks"] == ["10.0.0.0/8"]
+
+
+class TestResolveParamsQuiet:
+    def test_quiet_resolves_from_saved(self):
+        """quiet=True: params resolved from saved without prints/wizard."""
+        tc = TunnelConfig(name="fortivpn", type="fortivpn")
+        saved = {
+            "fortivpn": {
+                "host": "vpn.com", "port": "443",
+                "login": "user", "pass": "secret",
+                "cert_mode": "manual", "trusted_cert": "abc123",
+            },
+        }
+        resolve_tunnel_params(tc, FortiVPNPlugin, saved, Path("/tmp"), quiet=True)
+        assert tc.auth["host"] == "vpn.com"
+        assert tc.auth["login"] == "user"
+
+    def test_quiet_raises_on_missing_required(self):
+        """quiet=True: required param missing -> SetupRequiredError."""
+        tc = TunnelConfig(name="fortivpn", type="fortivpn")
+        with pytest.raises(SetupRequiredError):
+            resolve_tunnel_params(tc, FortiVPNPlugin, {}, Path("/tmp"), quiet=True)
+
+
+class TestLoadSettingsQuiet:
+    def test_quiet_loads_without_print(self, tmp_dir: Path, capsys):
+        """quiet=True: loads settings without printing."""
+        data = {"forti": {"host": "vpn.com"}}
+        (tmp_dir / SETTINGS_FILENAME).write_text(json.dumps(data))
+        result = load_settings(tmp_dir, quiet=True)
+        assert result["forti"]["host"] == "vpn.com"
+        out = capsys.readouterr().out
+        assert "загружены" not in out
+
+    def test_quiet_returns_empty_when_no_file(self, tmp_dir: Path, capsys):
+        """quiet=True: no file -> empty dict, no print."""
+        result = load_settings(tmp_dir, quiet=True)
+        assert result == {}
+        out = capsys.readouterr().out
+        assert "не найдены" not in out
+
+
+# =========================================================================
+# Log directory and file management
+# =========================================================================
+
+class TestResolveLogDir:
+    def test_relative_resolves_to_script_dir(self, tmp_dir):
+        """Relative log_dir resolves against script_dir."""
+        cfg.paths.log_dir = "logs"
+        result = resolve_log_dir(tmp_dir)
+        assert result == tmp_dir / "logs"
+
+    def test_absolute_stays_absolute(self, tmp_dir):
+        """Absolute log_dir is returned as-is."""
+        cfg.paths.log_dir = "/var/log/tunnelvault"
+        result = resolve_log_dir(tmp_dir)
+        assert result == Path("/var/log/tunnelvault")
+
+
+class TestEnsureLogDir:
+    def test_creates_directory(self, tmp_dir):
+        """Creates log directory if it doesn't exist."""
+        cfg.paths.log_dir = "logs"
+        result = ensure_log_dir(tmp_dir)
+        assert result.exists()
+        assert result.is_dir()
+        assert result == tmp_dir / "logs"
+
+    def test_existing_dir_no_error(self, tmp_dir):
+        """No error if directory already exists."""
+        (tmp_dir / "logs").mkdir()
+        cfg.paths.log_dir = "logs"
+        result = ensure_log_dir(tmp_dir)
+        assert result.exists()
+
+
+class TestResolveLogPaths:
+    def test_relative_paths_resolved(self, tmp_dir):
+        """Relative log paths are resolved against script_dir."""
+        cfg.paths.log_dir = "logs"
+        tunnels = [
+            TunnelConfig(name="t1", type="openvpn", log="logs/openvpn-t1.log"),
+        ]
+        resolve_log_paths(tunnels, tmp_dir)
+        assert tunnels[0].log == str(tmp_dir / "logs" / "openvpn-t1.log")
+
+    def test_absolute_paths_unchanged(self, tmp_dir):
+        """Absolute log paths are not modified."""
+        cfg.paths.log_dir = "logs"
+        tunnels = [
+            TunnelConfig(name="t1", type="openvpn", log="/var/log/my.log"),
+        ]
+        resolve_log_paths(tunnels, tmp_dir)
+        assert tunnels[0].log == "/var/log/my.log"
+
+    def test_empty_log_skipped(self, tmp_dir):
+        """Tunnels without log field are skipped."""
+        cfg.paths.log_dir = "logs"
+        tunnels = [TunnelConfig(name="t1", type="openvpn", log="")]
+        resolve_log_paths(tunnels, tmp_dir)
+        assert tunnels[0].log == ""
+
+
+class TestPrepareLogFiles:
+    def test_creates_empty_readable_files(self, tmp_dir):
+        """Pre-creates log files with 0644 permissions."""
+        log_path = tmp_dir / "logs" / "test.log"
+        tunnels = [TunnelConfig(name="t", log=str(log_path))]
+        prepare_log_files(tunnels)
+        assert log_path.exists()
+        assert log_path.read_bytes() == b""
+        mode = log_path.stat().st_mode & 0o777
+        assert mode == 0o644
+
+    def test_creates_parent_dir(self, tmp_dir):
+        """Creates parent directory if it doesn't exist."""
+        log_path = tmp_dir / "deep" / "nested" / "test.log"
+        tunnels = [TunnelConfig(name="t", log=str(log_path))]
+        prepare_log_files(tunnels)
+        assert log_path.exists()
+
+    def test_truncates_existing_file(self, tmp_dir):
+        """Truncates existing log file (cleans old content)."""
+        log_path = tmp_dir / "test.log"
+        log_path.write_text("old content here")
+        tunnels = [TunnelConfig(name="t", log=str(log_path))]
+        prepare_log_files(tunnels)
+        assert log_path.read_bytes() == b""
+
+    def test_skips_empty_log(self, tmp_dir):
+        """Tunnels without log field are skipped."""
+        tunnels = [TunnelConfig(name="t", log="")]
+        prepare_log_files(tunnels)  # no crash

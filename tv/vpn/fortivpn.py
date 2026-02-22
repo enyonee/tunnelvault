@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import platform
-import re
 import time
 from pathlib import Path
 
@@ -15,50 +14,13 @@ from tv.net import NetManager
 from tv.vpn.base import ConfigParam, TunnelPlugin, VPNResult
 from tv.vpn.registry import register
 
-_IP_RE = re.compile(r"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})")
-
-
-def _detect_ppp_gateway(log_path: Path, net: NetManager, interface: str = "ppp0") -> str:
-    """Detect PPP peer gateway from forti log, then ifconfig fallback."""
-    keywords = ("remote ip address", "ppp gateway", "peer")
-
+def _detect_ppp_gateway(net: NetManager, interface: str = "ppp0") -> str:
+    """Detect PPP peer gateway from interface via system call."""
     for _ in range(cfg.timeouts.fortivpn_gw_attempts):
-        try:
-            content = log_path.read_text()
-            for line in content.splitlines():
-                if any(kw in line.lower() for kw in keywords):
-                    m = _IP_RE.search(line)
-                    if m:
-                        return m.group(1)
-        except OSError:
-            pass
+        peer = net.ppp_peer(interface)
+        if peer:
+            return peer
         time.sleep(cfg.timeouts.fortivpn_gw_poll)
-
-    # Fallback: parse ifconfig for the detected interface
-    info = net.iface_info(interface)
-    if not info:
-        return ""
-
-    if platform.system() == "Darwin":
-        for line in info.splitlines():
-            if "inet " in line:
-                parts = line.split()
-                # macOS: inet X.X.X.X --> Y.Y.Y.Y
-                if "-->" in parts:
-                    idx = parts.index("-->")
-                    if idx + 1 < len(parts):
-                        return parts[idx + 1]
-                # Older: inet X.X.X.X Y.Y.Y.Y (4th field = peer)
-                if len(parts) >= 4:
-                    return parts[3]
-    else:
-        m = re.search(r"P-t-P:(\d+\.\d+\.\d+\.\d+)", info)
-        if m:
-            return m.group(1)
-        m = re.search(r"peer (\d+\.\d+\.\d+\.\d+)", info)
-        if m:
-            return m.group(1)
-
     return ""
 
 
@@ -69,27 +31,16 @@ def _show_error(forti_proc, forti_log: Path, log: Logger, label: str = "ppp") ->
 
     pid = forti_proc.pid
     if proc.is_alive(pid):
-        print(f"  {ui.YELLOW}├─{ui.NC} Процесс жив (PID={pid}), но {label} не появился")
+        details = [("", f"Процесс жив (PID={pid}), но {label} не появился")]
         log.log("WARN", f"Процесс FortiVPN PID={pid} жив, но {label} не появился")
     else:
         rc = forti_proc.poll()
         rc_display = rc if rc is not None else "?"
-        print(f"  {ui.RED}├─{ui.NC} Процесс завершился с кодом: {ui.RED}{ui.BOLD}{rc_display}{ui.NC}")
+        details = [("", f"Процесс завершился с кодом: {rc_display}")]
         log.log("ERROR", f"Процесс FortiVPN завершился с кодом {rc}")
 
-    # Show log to user
-    try:
-        content = forti_log.read_text()
-        if content.strip():
-            log.log_lines("ERROR", content)
-            tail = content.strip().splitlines()[-15:]
-            ui.show_log_tail("Лог openfortivpn:", tail, f"cat {forti_log}")
-        else:
-            print(f"  {ui.YELLOW}├─{ui.NC} Лог пуст (openfortivpn упал мгновенно)")
-            print(f"  {ui.YELLOW}└─{ui.NC} Полный лог: {ui.DIM}cat {forti_log}{ui.NC}")
-    except OSError:
-        print(f"  {ui.YELLOW}├─{ui.NC} Лог недоступен")
-        print(f"  {ui.YELLOW}└─{ui.NC} Полный лог: {ui.DIM}cat {forti_log}{ui.NC}")
+    details.append(("", f"Лог: {forti_log}"))
+    ui.error_tree(details)
 
 
 @register("fortivpn")
@@ -165,13 +116,29 @@ class FortiVPNPlugin(TunnelPlugin):
             os.close(conf_fd)
         self._conf_path = conf_path
 
+        # Managed mode: custom routes/DNS defined - take control via --no-routes --no-dns
+        # Native mode: no custom routes/DNS - let openfortivpn handle routing natively
+        has_custom_routes = bool(
+            self.cfg.routes.get("hosts")
+            or self.cfg.routes.get("networks")
+        )
+        has_custom_dns = bool(
+            self.cfg.dns.get("nameservers")
+            and self.cfg.dns.get("domains")
+        )
+        managed = has_custom_routes or has_custom_dns
+
+        cmd = ["openfortivpn", "-c", conf_path]
+        if managed:
+            cmd += ["--no-routes", "--no-dns"]
+            self.log.log("INFO", "Режим: managed (--no-routes --no-dns)")
+        else:
+            self.log.log("INFO", "Режим: native (роутинг от openfortivpn)")
+
         # Launch in background (log file created as current user)
-        self.log.log("INFO", "Запуск: sudo openfortivpn -c <tmpfile> --no-routes --no-dns")
+        self.log.log("INFO", f"Запуск: sudo {' '.join(cmd)}")
         forti_proc = proc.run_background(
-            [
-                "openfortivpn", "-c", conf_path,
-                "--no-routes", "--no-dns",
-            ],
+            cmd,
             sudo=True,
             log_path=str(log_path),
         )
@@ -207,8 +174,17 @@ class FortiVPNPlugin(TunnelPlugin):
         self.log.log("INFO", f"FortiVPN подключен ({ppp_iface})")
         self.log.log_lines("INFO", f"ifconfig {ppp_iface}:\n{self.net.iface_info(ppp_iface)}")
 
-        # PPP gateway
-        ppp_gw = _detect_ppp_gateway(log_path, self.net, interface=ppp_iface)
+        # Native mode: openfortivpn handles routes/DNS, just log PPP gateway
+        if not managed:
+            ppp_gw = _detect_ppp_gateway(self.net, interface=ppp_iface)
+            if ppp_gw:
+                print(f"  ↳ peer: {ui.YELLOW}{ppp_gw}{ui.NC}")
+                self.log.log("INFO", f"PPP_GW={ppp_gw}")
+            self.log.log("INFO", f"Маршруты после FortiVPN (native):\n{self.net.route_table()}")
+            return VPNResult(ok=True, pid=forti_pid)
+
+        # Managed mode: custom routes via PPP gateway
+        ppp_gw = _detect_ppp_gateway(self.net, interface=ppp_iface)
         if not ppp_gw:
             if fallback_gw:
                 ui.warn(f"Не удалось определить PPP gateway, используем fallback: {fallback_gw}")
