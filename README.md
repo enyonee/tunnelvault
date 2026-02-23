@@ -8,6 +8,7 @@
 <a href="#-cross-platform"><img src="https://img.shields.io/badge/macOS_|_Linux-lightgrey?style=for-the-badge&logo=apple&logoColor=white" alt="Platform"></a>
 <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue?style=for-the-badge" alt="License"></a>
 <a href="pyproject.toml"><img src="https://img.shields.io/badge/v1.2-00B4AB?style=for-the-badge&logo=semantic-release&logoColor=white" alt="Version"></a>
+<img src="https://img.shields.io/badge/tests-654_passed-brightgreen?style=for-the-badge&logo=pytest&logoColor=white" alt="Tests">
 
 <kbd>OpenVPN</kbd> &nbsp; <kbd>FortiVPN</kbd> &nbsp; <kbd>sing-box</kbd> &nbsp; <kbd>+ your plugin</kbd>
 
