@@ -53,6 +53,13 @@ class NetManager(ABC):
     @abstractmethod
     def cleanup_dns_resolver(self, domains: list[str], interface: str = "") -> None: ...
 
+    def cleanup_local_dns_resolvers(self) -> list[str]:
+        """Scan and remove resolver files pointing to localhost (safety net).
+
+        Returns list of cleaned zone names. Default: no-op (Linux).
+        """
+        return []
+
     @abstractmethod
     def disable_ipv6(self) -> bool: ...
 
@@ -124,20 +131,21 @@ class DarwinNet(NetManager):
 
     def interfaces(self) -> dict[str, str]:
         result: dict[str, str] = {}
-        r = _run(["ifconfig", "-l"])
+        r = _run(["ifconfig", "-a"])
         if r.returncode != 0:
             return result
-        for iface in r.stdout.strip().split():
-            r2 = _run(["ifconfig", iface])
-            for line in r2.stdout.splitlines():
-                if "inet " in line:
-                    parts = line.strip().split()
-                    try:
-                        idx = parts.index("inet")
-                        result[iface] = parts[idx + 1]
-                    except (ValueError, IndexError):
-                        pass
-                    break
+        current: str | None = None
+        for line in r.stdout.splitlines():
+            # Interface header: "en0: flags=8863<...> mtu 1500"
+            if line and not line[0].isspace() and ":" in line:
+                current = line.split(":")[0]
+            elif current and current not in result and "inet " in line:
+                parts = line.strip().split()
+                try:
+                    idx = parts.index("inet")
+                    result[current] = parts[idx + 1]
+                except (ValueError, IndexError):
+                    pass
         return result
 
     def check_interface(self, name: str) -> bool:
@@ -164,7 +172,7 @@ class DarwinNet(NetManager):
         # macOS uses /etc/resolver/ files - interface is not needed
         resolver_dir = cfg.paths.resolver_dir
         _run(["sudo", "mkdir", "-p", resolver_dir])
-        content = "\n".join(f"nameserver {ns}" for ns in nameservers) + "\n"
+        content = "# tunnelvault\n" + "\n".join(f"nameserver {ns}" for ns in nameservers) + "\n"
         results: dict[str, bool] = {}
         for domain in domains:
             r = _run(
@@ -178,6 +186,33 @@ class DarwinNet(NetManager):
         resolver_dir = cfg.paths.resolver_dir
         files = [f"{resolver_dir}/{d}" for d in domains]
         _run(["sudo", "rm", "-f"] + files)
+
+    def cleanup_local_dns_resolvers(self) -> list[str]:
+        """Remove /etc/resolver/ files created by tunnelvault (identified by marker)."""
+        import os
+
+        resolver_dir = cfg.paths.resolver_dir
+        if not os.path.isdir(resolver_dir):
+            return []
+
+        cleaned = []
+        try:
+            entries = os.listdir(resolver_dir)
+        except OSError:
+            return []
+
+        for name in entries:
+            path = os.path.join(resolver_dir, name)
+            try:
+                with open(path) as f:
+                    content = f.read()
+            except OSError:
+                continue
+            if "# tunnelvault" in content:
+                _run(["sudo", "rm", "-f", path])
+                cleaned.append(name)
+
+        return cleaned
 
     def _active_network_services(self) -> list[str]:
         """Discover active network services (Wi-Fi, Ethernet, etc.)."""

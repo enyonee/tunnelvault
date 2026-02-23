@@ -6,6 +6,7 @@ from pathlib import Path
 
 from tv import proc, ui
 from tv.app_config import cfg
+from tv.i18n import t
 from tv.logger import Logger
 from tv.vpn.base import ConfigParam, TunnelPlugin, VPNResult
 from tv.vpn.registry import register
@@ -15,7 +16,12 @@ from tv.vpn.registry import register
 class SingBoxPlugin(TunnelPlugin):
     """sing-box tunnel plugin."""
 
+    type_display_name = "sing-box"
     process_names = ["sing-box"]
+
+    @classmethod
+    def emergency_patterns(cls, script_dir) -> list[str]:
+        return [f"sing-box run -c {script_dir}"]
 
     @classmethod
     def discover_pid(cls, tcfg, script_dir) -> int | None:
@@ -26,7 +32,7 @@ class SingBoxPlugin(TunnelPlugin):
     @classmethod
     def config_schema(cls) -> list[ConfigParam]:
         return [
-            ConfigParam("config_file", "sing-box конфиг", default=cfg.defaults.singbox_config,
+            ConfigParam("config_file", "param.sb_config", default=cfg.defaults.singbox_config,
                          env_var="VPN_SINGBOX_CONFIG", target="config_file"),
         ]
 
@@ -43,10 +49,10 @@ class SingBoxPlugin(TunnelPlugin):
         log_path = self._default_log_path()
         interface = self.cfg.interface
 
-        self.log.log("INFO", f"Конфиг: {config_path}")
+        self.log.log("INFO", f"Config: {config_path}")
 
         # Launch in background
-        self.log.log("INFO", f"Запуск: sudo sing-box run -c {config_path}")
+        self.log.log("INFO", f"Launch: sudo sing-box run -c {config_path}")
         sb_proc = proc.run_background(
             ["sing-box", "run", "-c", str(config_path)],
             sudo=True,
@@ -67,8 +73,8 @@ class SingBoxPlugin(TunnelPlugin):
             return VPNResult(ok=False, pid=sb_pid)
 
         # Connected
-        ui.ok(f"sing-box подключен ({interface})")
-        self.log.log("INFO", f"sing-box подключен ({interface})")
+        ui.ok(t("vpn.sb.connected", iface=interface))
+        self.log.log("INFO", f"sing-box connected ({interface})")
         self.log.log_lines("INFO", f"ifconfig {interface}:\n{self.net.iface_info(interface)}")
 
         # Routes through interface (hosts + networks from config/targets)
@@ -77,7 +83,7 @@ class SingBoxPlugin(TunnelPlugin):
         # DNS resolver (domains + nameservers from config/targets)
         self.setup_dns()
 
-        self.log.log("INFO", f"Маршруты после sing-box:\n{self.net.route_table()}")
+        self.log.log("INFO", f"Routes after sing-box:\n{self.net.route_table()}")
 
         return VPNResult(ok=True, pid=sb_pid)
 
@@ -88,18 +94,18 @@ class SingBoxPlugin(TunnelPlugin):
 
 def _show_error(sb_proc, log_path: Path, log: Logger) -> None:
     """Display sing-box error details."""
-    ui.fail(f"sing-box не поднялся за {cfg.timeouts.singbox_iface}с")
-    log.log("ERROR", f"sing-box не поднялся за {cfg.timeouts.singbox_iface}с")
+    ui.fail(t("vpn.sb.not_connected", timeout=cfg.timeouts.singbox_iface))
+    log.log("ERROR", f"sing-box did not start within {cfg.timeouts.singbox_iface}s")
 
     pid = sb_proc.pid
     if proc.is_alive(pid):
-        details = [("", f"Процесс жив (PID={pid}), но интерфейс не появился")]
-        log.log("WARN", f"Процесс sing-box PID={pid} жив, но интерфейс не появился")
+        details = [("", t("vpn.sb.alive_no_iface", pid=pid))]
+        log.log("WARN", f"sing-box PID={pid} alive but interface not found")
     else:
         rc = sb_proc.poll()
         rc_display = rc if rc is not None else "?"
-        details = [("", f"Процесс завершился с кодом: {rc_display}")]
-        log.log("ERROR", f"Процесс sing-box завершился с кодом {rc}")
+        details = [("", t("vpn.sb.exited", rc=rc_display))]
+        log.log("ERROR", f"sing-box process exited with code {rc}")
 
-    details.append(("", f"Лог: {log_path}"))
+    details.append(("", t("vpn.sb.log_hint", path=log_path)))
     ui.error_tree(details)

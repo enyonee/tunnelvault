@@ -13,7 +13,7 @@ from tv.checks import (
     _check_dns,
     _check_http,
     _check_http_any,
-    _get_external_ip,
+    get_external_ip,
     _run_one,
     CheckResult,
 )
@@ -74,7 +74,7 @@ class TestGetExternalIp:
     @patch("subprocess.run")
     def test_returns_ip(self, mock_run):
         mock_run.return_value = subprocess.CompletedProcess([], 0, "1.2.3.4", "")
-        assert _get_external_ip("https://ifconfig.me") == "1.2.3.4"
+        assert get_external_ip("https://ifconfig.me") == "1.2.3.4"
 
 
 # =========================================================================
@@ -123,7 +123,7 @@ class TestGetExternalIpInverse:
     @patch("subprocess.run")
     def test_returns_none(self, mock_run, rc, stdout):
         mock_run.return_value = subprocess.CompletedProcess([], rc, stdout, "")
-        assert _get_external_ip("https://ifconfig.me") is None
+        assert get_external_ip("https://ifconfig.me") is None
 
 
 # =========================================================================

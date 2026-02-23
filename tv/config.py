@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from tv import ui, routing
 from tv.app_config import cfg
+from tv.i18n import t
 
 if TYPE_CHECKING:
     from tv.vpn.base import TunnelConfig
@@ -25,20 +26,25 @@ class SetupRequiredError(Exception):
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
-        description="tunnelvault - multi-VPN connection manager",
+        description=t("cli.desc"),
     )
-    p.add_argument("--disconnect", action="store_true", help="Отключить все VPN")
-    p.add_argument("--clear", action="store_true",
-                   help="Отключить предыдущие VPN перед подключением (по умолчанию не трогает)")
-    p.add_argument("--setup", action="store_true",
-                   help="Интерактивная настройка (wizard)")
-    p.add_argument("--debug", action="store_true", help="DEBUG-вывод в stderr")
+    p.add_argument("--disconnect", action="store_true", help=t("cli.disconnect"))
+    p.add_argument("--clear", action="store_true", help=t("cli.clear"))
+    p.add_argument("--setup", action="store_true", help=t("cli.setup"))
+    p.add_argument("--debug", action="store_true", help=t("cli.debug"))
     p.add_argument(
         "--log-level",
         choices=["DEBUG", "INFO", "WARN", "ERROR", "FATAL"],
         default=None,
-        help="Уровень логирования (по умолчанию из конфига)",
+        help=t("cli.log_level"),
     )
+    p.add_argument("--status", action="store_true", help=t("cli.status"))
+    p.add_argument("--check", action="store_true", help=t("cli.check"))
+    p.add_argument("--reset", action="store_true", help=t("cli.reset"))
+    p.add_argument("--validate", action="store_true", help=t("cli.validate"))
+    p.add_argument("--only", type=str, default=None, help=t("cli.only"))
+    p.add_argument("--logs", nargs="?", const="", default=None, help=t("cli.logs"))
+    p.add_argument("--watch", action="store_true", help=t("cli.watch"))
     return p.parse_args()
 
 
@@ -51,12 +57,12 @@ def load_settings(script_dir: Path, *, quiet: bool = False) -> dict:
         try:
             data = json.loads(path.read_text())
             if not quiet:
-                print(f"  {ui.GREEN}📂{ui.NC} Настройки: {ui.GREEN}загружены{ui.NC} {ui.DIM}({cfg.paths.settings_file}){ui.NC}")
+                print(f"  {ui.GREEN}📂{ui.NC} {t('config.settings_loaded')} {ui.DIM}({cfg.paths.settings_file}){ui.NC}")
             return data
         except (json.JSONDecodeError, OSError) as e:
             if not quiet:
-                print(f"  {ui.RED}⚠{ui.NC}  Настройки: {ui.RED}ошибка чтения{ui.NC} {ui.DIM}({e}){ui.NC}")
-            # Fall through to bash format instead of returning empty
+                print(f"  {ui.RED}⚠{ui.NC}  {t('config.settings_error')} {ui.DIM}({e}){ui.NC}")
+            # Fall through to try bash settings migration
 
     # Try migrating from old bash format
     old_path = script_dir / ".vpn-settings"
@@ -64,22 +70,17 @@ def load_settings(script_dir: Path, *, quiet: bool = False) -> dict:
         migrated = _migrate_bash_settings(old_path)
         if migrated:
             if not quiet:
-                print(f"  {ui.GREEN}📂{ui.NC} Настройки: {ui.GREEN}мигрированы из .vpn-settings{ui.NC}")
+                print(f"  {ui.GREEN}📂{ui.NC} {t('config.settings_migrated')}")
             return migrated
 
     if not quiet:
-        print(f"  {ui.YELLOW}📂{ui.NC} Настройки: {ui.YELLOW}не найдены{ui.NC} {ui.DIM}(будет создан {cfg.paths.settings_file}){ui.NC}")
+        print(f"  {ui.YELLOW}📂{ui.NC} {t('config.settings_not_found')} {ui.DIM}{t('config.settings_will_create', file=cfg.paths.settings_file)}{ui.NC}")
     return {}
 
 
 def _migrate_bash_settings(path: Path) -> dict:
-    """Parse old bash SAVED_FOO=\"bar\" format into per-tunnel nested dict.
-
-    Returns: {"fortivpn": {"host": ..., "port": ...}, "openvpn": {"config_file": ...}, ...}
-    Keys match plugin config_schema() param.key values.
-    """
+    """Parse old bash SAVED_FOO=\"bar\" format into per-tunnel nested dict."""
     result: dict = {}
-    # (tunnel_name, param_key) - matches legacy fixed tunnel names
     key_map: dict[str, tuple[str, str]] = {
         "SAVED_OVPN_CONFIG": ("openvpn", "config_file"),
         "SAVED_PIKLEMA_CONFIG": ("singbox", "config_file"),
@@ -177,7 +178,7 @@ def resolve_tunnel_params(
                         ui.param_found(param.label, saved_val, cfg.paths.settings_file, param.secret)
                     continue
                 if not quiet:
-                    ui.param_found(param.label, current, "авто", param.secret)
+                    ui.param_found(param.label, current, t("config.source_auto"), param.secret)
                 continue
             if not quiet:
                 ui.param_found(param.label, current, "defaults.toml", param.secret)
@@ -221,11 +222,13 @@ def _handle_forti_cert(
     if tcfg.auth.get("trusted_cert"):
         return
 
+    cert_label = t("config.cert_sha256")
+
     # Check ENV
     env_val = os.environ.get("VPN_TRUSTED_CERT", "")
     if env_val:
         if not quiet:
-            ui.param_found("SHA256 сертификата", env_val, "$VPN_TRUSTED_CERT", False)
+            ui.param_found("param.cert_sha256", env_val, "$VPN_TRUSTED_CERT", False)
         tcfg.auth["trusted_cert"] = env_val
         return
 
@@ -233,7 +236,7 @@ def _handle_forti_cert(
     saved_val = tunnel_saved.get("trusted_cert", "")
     if saved_val:
         if not quiet:
-            ui.param_found("SHA256 сертификата", saved_val, cfg.paths.settings_file, False)
+            ui.param_found("param.cert_sha256", saved_val, cfg.paths.settings_file, False)
         tcfg.auth["trusted_cert"] = saved_val
         return
 
@@ -244,20 +247,20 @@ def _handle_forti_cert(
         return
 
     if not quiet:
-        print(f"  🔑 Генерация SHA256 сертификата из {ui.BOLD}{host}:{port}{ui.NC}...")
+        print(f"  🔑 {t('config.cert_generating', host=host, port=port)}")
     cert = _generate_cert(host, port)
     if cert:
         if not quiet:
-            print(f"  {ui.GREEN}✅{ui.NC} Сгенерирован: {ui.YELLOW}{cert[:24]}...{ui.NC}")
+            print(f"  {ui.GREEN}✅{ui.NC} {t('config.cert_generated', cert=cert[:24])}")
         tcfg.auth["trusted_cert"] = cert
     else:
         if quiet:
             raise SetupRequiredError(
-                f"Сертификат не сгенерирован для {host}:{port}. Запустите с --setup."
+                t("config.cert_not_generated", host=host, port=port)
             )
-        print(f"  {ui.RED}❌{ui.NC} Не удалось подключиться к хосту")
-        ui.param_missing("SHA256 вручную")
-        tcfg.auth["trusted_cert"] = ui.wizard_input("SHA256 вручную", "", False)
+        print(f"  {ui.RED}❌{ui.NC} {t('config.cert_connect_failed', host=host, port=port)}")
+        ui.param_missing("param.cert_sha256")
+        tcfg.auth["trusted_cert"] = ui.wizard_input(cert_label, "", False)
 
 
 def resolve_tunnel_routes(
@@ -266,11 +269,7 @@ def resolve_tunnel_routes(
     *,
     quiet: bool = False,
 ) -> None:
-    """Resolve routes for a tunnel: TOML targets -> parse, or wizard.
-
-    Skip wizard if advanced config exists (networks/hosts already in TOML).
-    In quiet mode: no prints, no wizard. Unresolved routes default to native routing.
-    """
+    """Resolve routes for a tunnel: TOML targets -> parse, or wizard."""
     # Advanced mode: TOML already has explicit routes - skip wizard
     has_advanced = bool(
         tcfg.routes.get("networks")
@@ -280,13 +279,12 @@ def resolve_tunnel_routes(
         nets = tcfg.routes.get("networks", [])
         hosts = tcfg.routes.get("hosts", [])
         ui.param_found(
-            f"Маршруты ({tcfg.name})",
-            f"{len(nets)} сетей, {len(hosts)} хостов",
+            t("config.routes_label", name=tcfg.name),
+            t("config.routes_count", nets=len(nets), hosts=len(hosts)),
             "defaults.toml", False,
         )
 
     # Get targets: TOML -> saved -> wizard
-    # "targets" key present but empty = user chose native routing (don't re-ask)
     targets = tcfg.routes.get("targets", [])
     resolved = bool(targets) or has_advanced
 
@@ -299,7 +297,8 @@ def resolve_tunnel_routes(
                     ui.param_found("Targets", ", ".join(targets), cfg.paths.settings_file, False)
                 else:
                     ui.param_found(
-                        f"Маршруты ({tcfg.name})", "нативный роутинг",
+                        t("config.routes_label", name=tcfg.name),
+                        t("config.routes_native"),
                         cfg.paths.settings_file, False,
                     )
             resolved = True
@@ -325,7 +324,7 @@ def resolve_tunnel_routes(
         ns = tunnel_saved.get("dns_nameservers", [])
         if ns:
             if not quiet:
-                ui.param_found("DNS серверы", ", ".join(ns), cfg.paths.settings_file, False)
+                ui.param_found("DNS", ", ".join(ns), cfg.paths.settings_file, False)
         elif not quiet:
             ns = ui.wizard_nameservers(all_domains)
         if ns:
@@ -333,10 +332,7 @@ def resolve_tunnel_routes(
 
 
 def save_tunnel_settings(tunnels: list[TunnelConfig], script_dir: Path) -> None:
-    """Save resolved auth/config params to .vpn-settings.json.
-
-    Saves per-tunnel: {tunnel_name: {key: value, ...}, ...}
-    """
+    """Save resolved auth/config params to .vpn-settings.json."""
     from tv.vpn.registry import get_plugin
 
     data: dict = {}
@@ -370,11 +366,7 @@ def save_tunnel_settings(tunnels: list[TunnelConfig], script_dir: Path) -> None:
 
 
 def _write_settings(data: dict, script_dir: Path) -> None:
-    """Write settings dict to JSON with 0o600 permissions (atomic via rename).
-
-    If running under sudo, chown to the real user so the file stays readable
-    on subsequent non-sudo runs.
-    """
+    """Write settings dict to JSON with 0o600 permissions (atomic via rename)."""
     import tempfile
 
     path = script_dir / cfg.paths.settings_file
@@ -394,7 +386,7 @@ def _write_settings(data: dict, script_dir: Path) -> None:
         except OSError:
             pass
         raise
-    print(f"  {ui.GREEN}💾 Настройки сохранены{ui.NC} {ui.DIM}({cfg.paths.settings_file}){ui.NC}")
+    print(f"  {ui.GREEN}💾 {t('config.settings_saved')}{ui.NC} {ui.DIM}({cfg.paths.settings_file}){ui.NC}")
 
 
 def _chown_to_real_user(path: str) -> None:
@@ -434,18 +426,15 @@ def resolve_log_paths(tunnels: list[TunnelConfig], script_dir: Path) -> None:
 
 
 def prepare_log_files(tunnels: list[TunnelConfig]) -> None:
-    """Pre-create log files with correct ownership and readable permissions.
-
-    VPN processes run as root and would create 0600 files.
-    Pre-creating as 0644 ensures logs are readable without sudo.
-    """
+    """Pre-create log files with correct ownership and readable permissions."""
     for tc in tunnels:
         if not tc.log:
             continue
         p = Path(tc.log)
         p.parent.mkdir(parents=True, exist_ok=True)
         _chown_to_real_user(str(p.parent))
-        p.write_bytes(b"")
+        if not p.exists():
+            p.touch()
         os.chmod(str(p), 0o644)
         _chown_to_real_user(str(p))
 
@@ -455,11 +444,7 @@ def prepare_log_files(tunnels: list[TunnelConfig]) -> None:
 def _resolve_silent(
     param: ConfigParam, tunnel_saved: dict, *, quiet: bool = False,
 ) -> str:
-    """Resolve param from ENV/saved only (no wizard prompt).
-
-    Used for optional params like fallback_gateway that shouldn't
-    interrupt the user flow.
-    """
+    """Resolve param from ENV/saved only (no wizard prompt)."""
     if param.env_var:
         env_val = os.environ.get(param.env_var, "")
         if env_val:
@@ -482,24 +467,18 @@ def _resolve_param(
     secret: bool = False,
     quiet: bool = False,
 ) -> str:
-    """Resolve single param with priority chain: ENV -> saved -> wizard.
-
-    In quiet mode: no prints, no wizard. Uses default or raises SetupRequiredError.
-    """
-    def display(v: str) -> str:
-        return "****" if secret else v
-
+    """Resolve single param with priority chain: ENV -> saved -> wizard."""
     # 1. ENV
-    env_val = os.environ.get(env_name, "")
+    env_val = os.environ.get(env_name, "") if env_name else ""
     if env_val:
         if not quiet:
-            ui.param_found(label, display(env_val), f"${env_name}", secret)
+            ui.param_found(label, env_val, f"${env_name}", secret)
         return env_val
 
     # 2. Saved (.vpn-settings.json)
     if saved:
         if not quiet:
-            ui.param_found(label, display(saved), cfg.paths.settings_file, secret)
+            ui.param_found(label, saved, cfg.paths.settings_file, secret)
         return saved
 
     # 3. Quiet mode: use default or error
@@ -507,21 +486,22 @@ def _resolve_param(
         if default:
             return default
         raise SetupRequiredError(
-            f"Параметр '{label}' не задан. Запустите с --setup для настройки."
+            t("config.param_not_set", label=t(label))
         )
 
     # 4. Default from defaults.toml (show as placeholder in wizard)
     if default and not secret:
         ui.param_missing(label)
-        return ui.wizard_input(label, default, secret)
+        return ui.wizard_input(t(label), default, secret)
 
     # 5. Wizard without default
     ui.param_missing(label)
-    return ui.wizard_input(label, "", secret)
+    return ui.wizard_input(t(label), "", secret)
 
 
 def _generate_cert(host: str, port: str) -> str:
     """Generate SHA256 cert fingerprint via openssl pipe chain."""
+    procs: list[subprocess.Popen] = []
     try:
         s_client = subprocess.Popen(
             ["openssl", "s_client", "-connect", f"{host}:{port}"],
@@ -529,12 +509,14 @@ def _generate_cert(host: str, port: str) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
+        procs.append(s_client)
         x509 = subprocess.Popen(
             ["openssl", "x509", "-outform", "DER"],
             stdin=s_client.stdout,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
+        procs.append(x509)
         s_client.stdout.close()
 
         dgst = subprocess.Popen(
@@ -543,6 +525,7 @@ def _generate_cert(host: str, port: str) -> str:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
         )
+        procs.append(dgst)
         x509.stdout.close()
 
         # Send empty line to s_client (like "echo |")
@@ -560,4 +543,15 @@ def _generate_cert(host: str, port: str) -> str:
             return text
     except (subprocess.TimeoutExpired, OSError):
         pass
+    finally:
+        for p in procs:
+            try:
+                p.kill()
+            except OSError:
+                pass
+        for p in procs:
+            try:
+                p.wait(timeout=2)
+            except Exception:
+                pass
     return ""

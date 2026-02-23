@@ -190,7 +190,9 @@ class TestConnectFailure:
              patch("tv.vpn.openvpn.time.sleep"):
             mock_proc.find_pids.side_effect = [
                 [],  # Tunnelblick
-                [],  # openvpn PID -> не найден!
+                [],  # openvpn PID retry 1
+                [],  # openvpn PID retry 2
+                [],  # openvpn PID retry 3 -> не найден!
             ]
             mock_proc.run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
@@ -235,14 +237,14 @@ class TestConnectFailure:
         """PID не найден после запуска - показывает сообщение."""
         with patch("tv.vpn.openvpn.proc") as mock_proc, \
              patch("tv.vpn.openvpn.time.sleep"):
-            mock_proc.find_pids.side_effect = [[], []]
+            mock_proc.find_pids.side_effect = [[], [], [], []]
             mock_proc.run.return_value = subprocess.CompletedProcess([], 0, "", "")
 
             r = plugin.connect()
 
         assert r.ok is False
         out = capsys.readouterr().out
-        assert "PID не найден" in out
+        assert "PID not found" in out
 
     def test_failure_process_alive_shows_pid(self, plugin, capsys):
         """Процесс жив, но интерфейс не появился."""

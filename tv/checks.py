@@ -10,6 +10,7 @@ from typing import Callable, Optional
 
 from tv import ui
 from tv.app_config import cfg
+from tv.i18n import t
 from tv.logger import Logger
 
 
@@ -78,14 +79,14 @@ def _check_http_any(url: str, timeout: int | None = None) -> bool:
     if timeout is None:
         timeout = cfg.timeouts.check_http
     r = _run_check(
-        ["curl", "-4", "-s", "--max-time", str(timeout),
+        ["curl", "-4", "-sk", "--max-time", str(timeout),
          "-o", os.devnull, "-w", "%{http_code}", url],
         timeout + 2,
     )
     return r.returncode == 0 and r.stdout.strip() != "000"
 
 
-def _get_external_ip(url: str, timeout: int | None = None) -> Optional[str]:
+def get_external_ip(url: str, timeout: int | None = None) -> Optional[str]:
     if timeout is None:
         timeout = cfg.timeouts.check_external_ip
     r = _run_check(["curl", "-4", "-s", "--max-time", str(timeout), url], timeout + 2)
@@ -113,8 +114,8 @@ def _run_one(
     if not guard:
         print(f"{ui.YELLOW}⏭{ui.NC}")
         if logger:
-            logger.log("CHECK", f"[{idx}] {label} → SKIP")
-        return CheckResult(label, "skip", "пропуск")
+            logger.log("CHECK", f"[{idx}] {label} -> SKIP")
+        return CheckResult(label, "skip", t("check.skip"))
 
     try:
         ok = fn()
@@ -124,12 +125,12 @@ def _run_one(
     if ok:
         print(f"{ui.GREEN}✅{ui.NC}")
         if logger:
-            logger.log("CHECK", f"[{idx}] {label} ({cmd_hint}) → OK ({ok_msg})" if cmd_hint else f"[{idx}] {label} → OK ({ok_msg})")
+            logger.log("CHECK", f"[{idx}] {label} ({cmd_hint}) -> OK ({ok_msg})" if cmd_hint else f"[{idx}] {label} -> OK ({ok_msg})")
         return CheckResult(label, "ok", ok_msg)
     else:
         print(f"{ui.RED}❌{ui.NC}")
         if logger:
-            logger.log("CHECK", f"[{idx}] {label} ({cmd_hint}) → FAIL ({fail_msg})" if cmd_hint else f"[{idx}] {label} → FAIL ({fail_msg})")
+            logger.log("CHECK", f"[{idx}] {label} ({cmd_hint}) -> FAIL ({fail_msg})" if cmd_hint else f"[{idx}] {label} -> FAIL ({fail_msg})")
         return CheckResult(label, "fail", fail_msg)
 
 
@@ -188,7 +189,7 @@ def _run_ping_check(
     fb_cmd_hint = _fallback_hint(fallback, host) if has_fb else ""
     hint_parts = [p_hint]
     if fb_cmd_hint:
-        hint_parts.append(f"→ {fb_cmd_hint}")
+        hint_parts.append(f"-> {fb_cmd_hint}")
     cmd_display = " ".join(hint_parts)
 
     print(f"   {ui.DIM}[{idx}]{ui.NC} {check_label} {ui.DIM}{cmd_display}{ui.NC} ... ", end="", flush=True)
@@ -196,8 +197,8 @@ def _run_ping_check(
     if not guard:
         print(f"{ui.YELLOW}⏭{ui.NC}")
         if logger:
-            logger.log("CHECK", f"[{idx}] {check_label} ({cmd_display}) → SKIP")
-        return CheckResult(check_label, "skip", "пропуск")
+            logger.log("CHECK", f"[{idx}] {check_label} ({cmd_display}) -> SKIP")
+        return CheckResult(check_label, "skip", t("check.skip"))
 
     # Primary: ping
     try:
@@ -208,8 +209,8 @@ def _run_ping_check(
     if ping_ok:
         print(f"{ui.GREEN}✅{ui.NC}")
         if logger:
-            logger.log("CHECK", f"[{idx}] {check_label} ({p_hint}) → OK (ping)")
-        return CheckResult(check_label, "ok", "ping ok")
+            logger.log("CHECK", f"[{idx}] {check_label} ({p_hint}) -> OK (ping)")
+        return CheckResult(check_label, "ok", t("check.ping_ok"))
 
     # Fallback
     if has_fb:
@@ -223,20 +224,20 @@ def _run_ping_check(
             print(f"{ui.YELLOW}⚠{ui.NC}{ui.GREEN}✅{ui.NC} {ui.DIM}(fallback: {fb_cmd_hint}){ui.NC}")
             detail = f"fallback: {fb_label}"
             if logger:
-                logger.log("CHECK", f"[{idx}] {check_label} ({p_hint} fail → {fb_cmd_hint}) → OK")
+                logger.log("CHECK", f"[{idx}] {check_label} ({p_hint} fail -> {fb_cmd_hint}) -> OK")
             return CheckResult(check_label, "ok", detail)
         else:
             print(f"{ui.RED}❌{ui.NC} {ui.DIM}({p_hint} + {fb_cmd_hint}){ui.NC}")
             detail = f"ping + {fb_label} fail"
             if logger:
-                logger.log("CHECK", f"[{idx}] {check_label} ({p_hint} fail, {fb_cmd_hint} fail) → FAIL")
+                logger.log("CHECK", f"[{idx}] {check_label} ({p_hint} fail, {fb_cmd_hint} fail) -> FAIL")
             return CheckResult(check_label, "fail", detail)
 
     # No fallback, plain fail
     print(f"{ui.RED}❌{ui.NC}")
     if logger:
-        logger.log("CHECK", f"[{idx}] {check_label} ({p_hint}) → FAIL (не пингуется)")
-    return CheckResult(check_label, "fail", "не пингуется")
+        logger.log("CHECK", f"[{idx}] {check_label} ({p_hint}) -> FAIL ({t('check.no_ping')})")
+    return CheckResult(check_label, "fail", t("check.no_ping"))
 
 
 # --- Per-tunnel checks ---
@@ -260,10 +261,10 @@ def run_all_from_tunnels(
     ext_ip = ""
 
     if logger:
-        logger.log("INFO", "=== Проверки ===")
+        logger.log("INFO", "=== Checks ===")
 
     print()
-    print(f"  {ui.BOLD}🧪 Проверка подключений{ui.NC}")
+    print(f"  {ui.BOLD}🧪 {t('check.checks_title')}{ui.NC}")
     print()
 
     for tunnel_name, is_ok, checks_cfg in tunnel_checks:
@@ -282,7 +283,7 @@ def run_all_from_tunnels(
             results.append(_run_one(
                 idx, is_ok, f"{host}:{port}",
                 lambda h=host, p=port: _check_port(h, p),
-                "порт открыт", "порт закрыт", logger,
+                t("check.port_open"), t("check.port_closed"), logger,
                 cmd_hint=f"nc -z {host} {port}",
             ))
 
@@ -308,7 +309,7 @@ def run_all_from_tunnels(
             results.append(_run_one(
                 idx, is_ok, f"{name} @{server}",
                 lambda n=name, s=server: _check_dns(n, s),
-                "резолвит", "не резолвит", logger,
+                t("check.resolves"), t("check.no_resolve"), logger,
                 cmd_hint=f"nslookup {name} {server}",
             ))
 
@@ -319,7 +320,7 @@ def run_all_from_tunnels(
             results.append(_run_one(
                 idx, is_ok, label,
                 lambda u=url: _check_http_any(u),
-                "ok", "таймаут", logger,
+                "ok", t("check.timeout"), logger,
                 cmd_hint=f"curl -s {url}",
             ))
 
@@ -328,29 +329,30 @@ def run_all_from_tunnels(
         if ext_ip_url:
             idx += 1
             ext_hint = f"curl -s {ext_ip_url}"
-            print(f"   {ui.DIM}[{idx}]{ui.NC} Внешний IP {ui.DIM}{ext_hint}{ui.NC} ... ", end="", flush=True)
+            ext_label = t("check.external_ip")
+            print(f"   {ui.DIM}[{idx}]{ui.NC} {ext_label} {ui.DIM}{ext_hint}{ui.NC} ... ", end="", flush=True)
             if is_ok:
-                ext_ip = _get_external_ip(ext_ip_url) or ""
+                ext_ip = get_external_ip(ext_ip_url) or ""
                 if ext_ip:
                     print(f"{ui.GREEN}✅{ui.NC} {ui.DIM}({ext_ip}){ui.NC}")
-                    results.append(CheckResult("Внешний IP", "ok", ext_ip))
+                    results.append(CheckResult(ext_label, "ok", ext_ip))
                     if logger:
-                        logger.log("CHECK", f"[{idx}] Внешний IP → OK ({ext_ip})")
+                        logger.log("CHECK", f"[{idx}] External IP -> OK ({ext_ip})")
                 else:
                     print(f"{ui.RED}❌{ui.NC}")
-                    results.append(CheckResult("Внешний IP", "fail", "таймаут"))
+                    results.append(CheckResult(ext_label, "fail", t("check.timeout")))
                     if logger:
-                        logger.log("CHECK", f"[{idx}] Внешний IP → FAIL (таймаут)")
+                        logger.log("CHECK", f"[{idx}] External IP -> FAIL (timeout)")
             else:
                 print(f"{ui.YELLOW}⏭{ui.NC}")
-                results.append(CheckResult("Внешний IP", "skip", "пропуск"))
+                results.append(CheckResult(ext_label, "skip", t("check.skip")))
                 if logger:
-                    logger.log("CHECK", f"[{idx}] Внешний IP → SKIP")
+                    logger.log("CHECK", f"[{idx}] External IP -> SKIP")
 
     if logger:
         passed = sum(1 for r in results if r.status == "ok")
         failed = sum(1 for r in results if r.status == "fail")
         skipped = sum(1 for r in results if r.status == "skip")
-        logger.log("INFO", f"Проверки: passed={passed} failed={failed} skipped={skipped} total={len(results)}")
+        logger.log("INFO", f"Checks: passed={passed} failed={failed} skipped={skipped} total={len(results)}")
 
     return results, ext_ip

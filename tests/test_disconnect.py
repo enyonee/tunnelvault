@@ -45,27 +45,32 @@ def global_defs():
 # =========================================================================
 
 class TestDisconnect:
-    def test_kills_all_registered_processes(self, mock_net, logger, v3_defs):
-        """Kills all process_names from registered plugins."""
+    def test_uses_emergency_patterns_with_script_dir(self, mock_net, logger, v3_defs, tmp_path):
+        """Uses targeted emergency_patterns when script_dir is provided."""
+        with patch("tv.disconnect.proc") as mock_proc:
+            run(net=mock_net, log=logger, defs=v3_defs, script_dir=tmp_path)
+
+        patterns = [c[0][0] for c in mock_proc.kill_pattern.call_args_list]
+        # FortiVPN: uses temp_dir pattern
+        assert any("forti_" in p for p in patterns)
+        # OpenVPN: uses script_dir path
+        assert any(str(tmp_path) in p for p in patterns)
+        # sing-box: uses script_dir path
+        assert any("sing-box" in p and str(tmp_path) in p for p in patterns)
+        # No killall calls
+        mock_proc.killall.assert_not_called()
+
+    def test_uses_kill_patterns_without_script_dir(self, mock_net, logger, v3_defs):
+        """Falls back to kill_patterns when script_dir is not provided."""
         with patch("tv.disconnect.proc") as mock_proc:
             run(net=mock_net, log=logger, defs=v3_defs)
 
-        killall_calls = [c[0][0] for c in mock_proc.killall.call_args_list]
-        # All registered plugins' process_names
-        assert "openfortivpn" in killall_calls
-        assert "openvpn" in killall_calls
-        assert "sing-box" in killall_calls
-
-    def test_kills_plugin_patterns(self, mock_net, logger, v3_defs):
-        """Kills plugin-specific patterns from kill_patterns class attr."""
-        with patch("tv.disconnect.proc") as mock_proc:
-            run(net=mock_net, log=logger, defs=v3_defs)
-
-        kill_patterns = [c[0][0] for c in mock_proc.kill_pattern.call_args_list]
-        # OpenVPN tunnelvault pattern
-        assert any("tunnelvault" in p for p in kill_patterns)
-        # FortiVPN sudo pattern
-        assert any("sudo openfortivpn" in p for p in kill_patterns)
+        patterns = [c[0][0] for c in mock_proc.kill_pattern.call_args_list]
+        # Uses class-level kill_patterns as fallback
+        assert any("openvpn" in p for p in patterns)
+        assert any("forti_" in p for p in patterns)
+        # No killall calls
+        mock_proc.killall.assert_not_called()
 
     def test_removes_static_routes(self, mock_net, logger, v3_defs):
         """Deletes static VPN server routes from defs."""
@@ -108,7 +113,7 @@ class TestDisconnect:
             run(net=mock_net, log=logger, defs=v3_defs)
 
         content = logger.log_path.read_text()
-        assert "Disconnect завершён" in content
+        assert "Disconnect complete" in content
 
     def test_prints_done_message(self, mock_net, logger, capsys, v3_defs):
         """Prints final message."""
@@ -116,7 +121,7 @@ class TestDisconnect:
             run(net=mock_net, log=logger, defs=v3_defs)
 
         out = capsys.readouterr().out
-        assert "Всё отключено" in out
+        assert "All disconnected" in out
 
 
 # =========================================================================
@@ -139,7 +144,7 @@ class TestDisconnectInverse:
             run(net=mock_net, log=None, defs=v3_defs)
 
         out = capsys.readouterr().out
-        assert "Всё отключено" in out
+        assert "All disconnected" in out
 
     def test_empty_defs_no_crash(self, mock_net, logger, capsys):
         """Empty defs -> nothing to clean, no crash."""
@@ -147,7 +152,7 @@ class TestDisconnectInverse:
             run(net=mock_net, log=logger, defs={})
 
         out = capsys.readouterr().out
-        assert "Всё отключено" in out
+        assert "All disconnected" in out
 
     def test_none_defs_no_crash(self, mock_net, logger, capsys):
         """defs=None -> no crash."""
@@ -155,7 +160,7 @@ class TestDisconnectInverse:
             run(net=mock_net, log=logger, defs=None)
 
         out = capsys.readouterr().out
-        assert "Всё отключено" in out
+        assert "All disconnected" in out
 
     def test_kill_failure_doesnt_stop_cleanup(self, mock_net, logger, capsys, v3_defs):
         """Kill error does NOT stop cleanup."""
@@ -165,7 +170,7 @@ class TestDisconnectInverse:
             run(net=mock_net, log=logger, defs=v3_defs)
 
         out = capsys.readouterr().out
-        assert "Всё отключено" in out
+        assert "All disconnected" in out
         mock_net.restore_ipv6.assert_called_once()
 
     def test_order_kill_before_routes(self, mock_net, logger, v3_defs):
@@ -275,3 +280,150 @@ class TestRunPlugins:
         """Empty tunnel list shouldn't crash."""
         run_plugins([], net=mock_net, log=logger, defs={})
         mock_net.restore_ipv6.assert_called_once()
+
+
+# =========================================================================
+# Bypass routes cleanup
+# =========================================================================
+
+class TestBypassRoutesCleanup:
+    def test_removes_bypass_hosts(self, mock_net, logger, capsys):
+        """Bypass host routes are deleted on disconnect."""
+        defs = {
+            "global": {
+                "bypass": {
+                    "hosts": ["8.8.8.8", "1.1.1.1"],
+                    "domains": [],
+                    "networks": [],
+                },
+            },
+        }
+        with patch("tv.disconnect.proc"):
+            run(net=mock_net, log=logger, defs=defs)
+
+        deleted = [c[0][0] for c in mock_net.delete_host_route.call_args_list]
+        assert "8.8.8.8" in deleted
+        assert "1.1.1.1" in deleted
+
+    def test_removes_bypass_domains(self, mock_net, logger, capsys):
+        """Bypass domain routes are resolved and deleted."""
+        mock_net.resolve_host.return_value = ["140.82.121.3"]
+        defs = {
+            "global": {
+                "bypass": {
+                    "hosts": [],
+                    "domains": ["github.com"],
+                    "networks": [],
+                },
+            },
+        }
+        with patch("tv.disconnect.proc"):
+            run(net=mock_net, log=logger, defs=defs)
+
+        mock_net.resolve_host.assert_any_call("github.com")
+        deleted = [c[0][0] for c in mock_net.delete_host_route.call_args_list]
+        assert "140.82.121.3" in deleted
+
+    def test_removes_bypass_networks(self, mock_net, logger, capsys):
+        """Bypass network routes are deleted."""
+        defs = {
+            "global": {
+                "bypass": {
+                    "hosts": [],
+                    "domains": [],
+                    "networks": ["192.168.1.0/24"],
+                },
+            },
+        }
+        with patch("tv.disconnect.proc"):
+            run(net=mock_net, log=logger, defs=defs)
+
+        deleted = [c[0][0] for c in mock_net.delete_net_route.call_args_list]
+        assert "192.168.1.0/24" in deleted
+
+    def test_no_bypass_section_no_crash(self, mock_net, logger, capsys):
+        """No bypass section - no crash."""
+        with patch("tv.disconnect.proc"):
+            run(net=mock_net, log=logger, defs={})
+
+        out = capsys.readouterr().out
+        assert "All disconnected" in out
+        assert "bypass" not in out.lower()
+
+
+# =========================================================================
+# Domain suffix emergency cleanup
+# =========================================================================
+
+class TestDomainSuffixCleanup:
+    def test_emergency_cleanup_removes_suffix_resolvers(self, mock_net, logger, capsys):
+        """Emergency disconnect removes /etc/resolver/ files for domain_suffix."""
+        defs = {
+            "global": {
+                "bypass": {
+                    "domain_suffix": [".ru", ".рф"],
+                    "upstream_dns": "8.8.8.8",
+                },
+            },
+        }
+        with patch("tv.disconnect.proc"):
+            run(net=mock_net, log=logger, defs=defs)
+
+        mock_net.cleanup_dns_resolver.assert_called_once_with(["ru", "рф"])
+        # Upstream DNS route deleted
+        deleted = [c[0][0] for c in mock_net.delete_host_route.call_args_list]
+        assert "8.8.8.8" in deleted
+
+        out = capsys.readouterr().out
+        assert "resolver" in out.lower()
+
+    def test_emergency_cleanup_no_suffix_no_resolver_cleanup(self, mock_net, logger, capsys):
+        """No domain_suffix - no resolver cleanup."""
+        defs = {
+            "global": {
+                "bypass": {
+                    "hosts": ["1.1.1.1"],
+                },
+            },
+        }
+        with patch("tv.disconnect.proc"):
+            run(net=mock_net, log=logger, defs=defs)
+
+        # cleanup_dns_resolver not called for suffix (may be called for other reasons)
+        out = capsys.readouterr().out
+        assert "resolver" not in out.lower()
+
+    def test_emergency_cleanup_default_upstream(self, mock_net, logger, capsys):
+        """Default upstream_dns (8.8.8.8) used when not specified."""
+        defs = {
+            "global": {
+                "bypass": {
+                    "domain_suffix": [".ru"],
+                },
+            },
+        }
+        with patch("tv.disconnect.proc"):
+            run(net=mock_net, log=logger, defs=defs)
+
+        deleted = [c[0][0] for c in mock_net.delete_host_route.call_args_list]
+        assert "8.8.8.8" in deleted
+
+    def test_safety_scan_cleans_leftover_resolvers(self, mock_net, logger, capsys):
+        """Safety net scan removes resolver files not listed in defs."""
+        mock_net.cleanup_local_dns_resolvers.return_value = ["example"]
+        with patch("tv.disconnect.proc"):
+            run(net=mock_net, log=logger, defs={})
+
+        mock_net.cleanup_local_dns_resolvers.assert_called_once()
+        out = capsys.readouterr().out
+        assert "example" in out
+
+    def test_safety_scan_no_leftovers(self, mock_net, logger, capsys):
+        """Safety net scan with no leftovers - silent."""
+        mock_net.cleanup_local_dns_resolvers.return_value = []
+        with patch("tv.disconnect.proc"):
+            run(net=mock_net, log=logger, defs={})
+
+        mock_net.cleanup_local_dns_resolvers.assert_called_once()
+        out = capsys.readouterr().out
+        assert "extra resolver" not in out.lower()

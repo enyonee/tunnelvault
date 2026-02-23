@@ -820,13 +820,13 @@ class TestPrepareLogFiles:
         prepare_log_files(tunnels)
         assert log_path.exists()
 
-    def test_truncates_existing_file(self, tmp_dir):
-        """Truncates existing log file (cleans old content)."""
+    def test_preserves_existing_file(self, tmp_dir):
+        """Does not truncate existing log file (may still be in use)."""
         log_path = tmp_dir / "test.log"
         log_path.write_text("old content here")
         tunnels = [TunnelConfig(name="t", log=str(log_path))]
         prepare_log_files(tunnels)
-        assert log_path.read_bytes() == b""
+        assert log_path.read_text() == "old content here"
 
     def test_skips_empty_log(self, tmp_dir):
         """Tunnels without log field are skipped."""

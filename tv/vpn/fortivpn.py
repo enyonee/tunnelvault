@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import os
 import platform
 import time
@@ -9,10 +10,19 @@ from pathlib import Path
 
 from tv import proc, ui
 from tv.app_config import cfg
+from tv.i18n import t
 from tv.logger import Logger
 from tv.net import NetManager
 from tv.vpn.base import ConfigParam, TunnelPlugin, VPNResult
 from tv.vpn.registry import register
+
+def _safe_unlink(path: str) -> None:
+    """Remove file if it exists. Silently ignore errors (atexit safety net)."""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
 
 def _detect_ppp_gateway(net: NetManager, interface: str = "ppp0") -> str:
     """Detect PPP peer gateway from interface via system call."""
@@ -26,32 +36,34 @@ def _detect_ppp_gateway(net: NetManager, interface: str = "ppp0") -> str:
 
 def _show_error(forti_proc, forti_log: Path, log: Logger, label: str = "ppp") -> None:
     """Display FortiVPN error details to user and log."""
-    ui.fail(f"FortiVPN не поднялся за {cfg.timeouts.fortivpn_ppp}с")
-    log.log("ERROR", f"FortiVPN не поднялся за {cfg.timeouts.fortivpn_ppp}с")
+    ui.fail(t("vpn.forti.not_connected", timeout=cfg.timeouts.fortivpn_ppp))
+    log.log("ERROR", f"FortiVPN did not start within {cfg.timeouts.fortivpn_ppp}s")
 
     pid = forti_proc.pid
     if proc.is_alive(pid):
-        details = [("", f"Процесс жив (PID={pid}), но {label} не появился")]
-        log.log("WARN", f"Процесс FortiVPN PID={pid} жив, но {label} не появился")
+        details = [("", t("vpn.forti.alive_no_iface", pid=pid, label=label))]
+        log.log("WARN", f"FortiVPN PID={pid} alive but {label} not found")
     else:
         rc = forti_proc.poll()
         rc_display = rc if rc is not None else "?"
-        details = [("", f"Процесс завершился с кодом: {rc_display}")]
-        log.log("ERROR", f"Процесс FortiVPN завершился с кодом {rc}")
+        details = [("", t("vpn.forti.exited", rc=rc_display))]
+        log.log("ERROR", f"FortiVPN process exited with code {rc}")
 
-    details.append(("", f"Лог: {forti_log}"))
+    details.append(("", t("vpn.forti.log_hint", path=forti_log)))
     ui.error_tree(details)
 
 
 @register("fortivpn")
 class FortiVPNPlugin(TunnelPlugin):
-    """FortiVPN tunnel plugin with PPP gateway detection.
+    """FortiVPN tunnel plugin with PPP gateway detection."""
 
-    Handles routes through PPP interface and DNS resolver setup.
-    """
-
+    type_display_name = "FortiVPN"
     process_names = ["openfortivpn"]
-    kill_patterns = ["sudo openfortivpn"]
+    kill_patterns = ["openfortivpn -c /tmp/forti_"]
+
+    @classmethod
+    def emergency_patterns(cls, script_dir) -> list[str]:
+        return [f"openfortivpn -c {cfg.paths.temp_dir}/forti_"]
 
     @classmethod
     def discover_pid(cls, tcfg, script_dir) -> int | None:
@@ -62,13 +74,13 @@ class FortiVPNPlugin(TunnelPlugin):
     @classmethod
     def config_schema(cls) -> list[ConfigParam]:
         return [
-            ConfigParam("host", "Хост", required=True, env_var="VPN_FORTI_HOST", target="auth"),
-            ConfigParam("port", "Порт", default=cfg.defaults.fortivpn_port, env_var="VPN_FORTI_PORT", target="auth"),
-            ConfigParam("login", "Логин", required=True, env_var="VPN_FORTI_LOGIN", target="auth"),
-            ConfigParam("pass", "Пароль", required=True, secret=True, env_var="VPN_FORTI_PASS", target="auth"),
-            ConfigParam("cert_mode", "Сертификат (auto/manual)", default=cfg.defaults.fortivpn_cert_mode, env_var="VPN_CERT_MODE", target="auth"),
-            ConfigParam("trusted_cert", "SHA256 сертификата", env_var="VPN_TRUSTED_CERT", target="auth"),
-            ConfigParam("fallback_gateway", "Fallback GW", env_var="VPN_FORTI_FALLBACK_GW",
+            ConfigParam("host", "param.host", required=True, env_var="VPN_FORTI_HOST", target="auth"),
+            ConfigParam("port", "param.port", default=cfg.defaults.fortivpn_port, env_var="VPN_FORTI_PORT", target="auth"),
+            ConfigParam("login", "param.login", required=True, env_var="VPN_FORTI_LOGIN", target="auth"),
+            ConfigParam("pass", "param.password", required=True, secret=True, env_var="VPN_FORTI_PASS", target="auth"),
+            ConfigParam("cert_mode", "param.cert_mode", default=cfg.defaults.fortivpn_cert_mode, env_var="VPN_CERT_MODE", target="auth"),
+            ConfigParam("trusted_cert", "param.cert_sha256", env_var="VPN_TRUSTED_CERT", target="auth"),
+            ConfigParam("fallback_gateway", "param.fallback_gw", env_var="VPN_FORTI_FALLBACK_GW",
                          target="extra", prompt=False),
         ]
 
@@ -94,7 +106,7 @@ class FortiVPNPlugin(TunnelPlugin):
 
         log_path = self._default_log_path()
 
-        self.log.log("INFO", f"Хост: {host}:{port}  Логин: {login}")
+        self.log.log("INFO", f"Host: {host}:{port}  Login: {login}")
         self.log.log("INFO", f"Cert: {trusted_cert[:24]}...")
 
         # Snapshot interfaces BEFORE connect (for ppp detection)
@@ -115,9 +127,8 @@ class FortiVPNPlugin(TunnelPlugin):
         finally:
             os.close(conf_fd)
         self._conf_path = conf_path
+        atexit.register(_safe_unlink, conf_path)
 
-        # Managed mode: custom routes/DNS defined - take control via --no-routes --no-dns
-        # Native mode: no custom routes/DNS - let openfortivpn handle routing natively
         has_custom_routes = bool(
             self.cfg.routes.get("hosts")
             or self.cfg.routes.get("networks")
@@ -131,12 +142,12 @@ class FortiVPNPlugin(TunnelPlugin):
         cmd = ["openfortivpn", "-c", conf_path]
         if managed:
             cmd += ["--no-routes", "--no-dns"]
-            self.log.log("INFO", "Режим: managed (--no-routes --no-dns)")
+            self.log.log("INFO", "Mode: managed (--no-routes --no-dns)")
         else:
-            self.log.log("INFO", "Режим: native (роутинг от openfortivpn)")
+            self.log.log("INFO", "Mode: native (routing from openfortivpn)")
 
         # Launch in background (log file created as current user)
-        self.log.log("INFO", f"Запуск: sudo {' '.join(cmd)}")
+        self.log.log("INFO", f"Launch: sudo {' '.join(cmd)}")
         forti_proc = proc.run_background(
             cmd,
             sudo=True,
@@ -165,13 +176,12 @@ class FortiVPNPlugin(TunnelPlugin):
             return VPNResult(ok=False, pid=forti_pid)
 
         ppp_iface = detected_iface
-        # Store detected interface for routes/dns/cleanup
         if not self.cfg.interface:
             self.cfg.interface = ppp_iface
 
         # --- Connected ---
-        ui.ok(f"FortiVPN подключен ({ppp_iface})")
-        self.log.log("INFO", f"FortiVPN подключен ({ppp_iface})")
+        ui.ok(t("vpn.forti.connected", iface=ppp_iface))
+        self.log.log("INFO", f"FortiVPN connected ({ppp_iface})")
         self.log.log_lines("INFO", f"ifconfig {ppp_iface}:\n{self.net.iface_info(ppp_iface)}")
 
         # Native mode: openfortivpn handles routes/DNS, just log PPP gateway
@@ -180,19 +190,19 @@ class FortiVPNPlugin(TunnelPlugin):
             if ppp_gw:
                 print(f"  ↳ peer: {ui.YELLOW}{ppp_gw}{ui.NC}")
                 self.log.log("INFO", f"PPP_GW={ppp_gw}")
-            self.log.log("INFO", f"Маршруты после FortiVPN (native):\n{self.net.route_table()}")
+            self.log.log("INFO", f"Routes after FortiVPN (native):\n{self.net.route_table()}")
             return VPNResult(ok=True, pid=forti_pid)
 
         # Managed mode: custom routes via PPP gateway
         ppp_gw = _detect_ppp_gateway(self.net, interface=ppp_iface)
         if not ppp_gw:
             if fallback_gw:
-                ui.warn(f"Не удалось определить PPP gateway, используем fallback: {fallback_gw}")
-                self.log.log("WARN", f"PPP_GW не определён, fallback={fallback_gw}")
+                ui.warn(t("vpn.forti.no_gw_fallback", gw=fallback_gw))
+                self.log.log("WARN", f"PPP_GW not found, fallback={fallback_gw}")
                 ppp_gw = fallback_gw
             else:
-                ui.warn("Не удалось определить PPP gateway, маршруты могут не работать")
-                self.log.log("WARN", "PPP_GW не определён, fallback не задан")
+                ui.warn(t("vpn.forti.no_gw"))
+                self.log.log("WARN", "PPP_GW not found, no fallback set")
                 return VPNResult(ok=True, pid=forti_pid)
 
         print(f"  ↳ peer: {ui.YELLOW}{ppp_gw}{ui.NC}")
@@ -209,7 +219,7 @@ class FortiVPNPlugin(TunnelPlugin):
             else:
                 ping_cmd = ["ping", "-c", "2", "-W", warmup, dns_servers[0]]
             proc.run_background(ping_cmd)
-            self.log.log("INFO", f"Фоновый ping {dns_servers[0]} запущен")
+            self.log.log("INFO", f"Background ping {dns_servers[0]} started")
 
         # DNS resolver
         if dns_domains and dns_servers:
@@ -218,11 +228,11 @@ class FortiVPNPlugin(TunnelPlugin):
             for domain, ok in results.items():
                 self.log.log(
                     "INFO" if ok else "WARN",
-                    f"Resolver для {domain} {'создан' if ok else 'FAIL'}",
+                    f"Resolver for {domain} {'created' if ok else 'FAIL'}",
                 )
 
         # Route snapshot
-        self.log.log("INFO", f"Маршруты после FortiVPN:\n{self.net.route_table()}")
+        self.log.log("INFO", f"Routes after FortiVPN:\n{self.net.route_table()}")
 
         return VPNResult(ok=True, pid=forti_pid)
 

@@ -296,7 +296,7 @@ class TestConnectFailure:
 
         assert r.ok is True
         out = capsys.readouterr().out
-        assert "маршруты могут не работать" in out
+        assert "routes may not work" in out
 
     def test_empty_dns_skips_resolver(self, tmp_dir, mock_net, logger):
         """Пустые dns domains/nameservers - не вызывает setup_dns_resolver."""

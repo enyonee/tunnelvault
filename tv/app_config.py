@@ -7,6 +7,7 @@ the existing object so every module that imported ``cfg`` sees updates.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, fields
 
 
@@ -73,6 +74,7 @@ class AppConfig:
     defaults: Defaults
     display: Display
     logging: Logging
+    locale: str = ""
 
 
 def _make_default() -> AppConfig:
@@ -97,9 +99,21 @@ _SECTION_MAP = {
 
 
 def load(app_dict: dict) -> None:
-    """Mutate ``cfg`` from TOML ``[app]`` section. Unknown keys are ignored."""
+    """Mutate ``cfg`` from TOML ``[app]`` section. Warns on unknown keys."""
     if not app_dict:
         return
+    # Top-level scalar keys (not nested sections)
+    _TOP_LEVEL = {"locale"}
+    for tk in _TOP_LEVEL:
+        if tk in app_dict:
+            setattr(cfg, tk, app_dict[tk])
+
+    known_sections = set(_SECTION_MAP)
+    for k in app_dict:
+        if k in _TOP_LEVEL:
+            continue
+        if k not in known_sections and isinstance(app_dict[k], dict):
+            warnings.warn(f"Unknown [app] section: '{k}'", stacklevel=2)
     for section_key, attr_name in _SECTION_MAP.items():
         sub = app_dict.get(section_key)
         if not sub or not isinstance(sub, dict):
@@ -109,6 +123,10 @@ def load(app_dict: dict) -> None:
         for k, v in sub.items():
             if k in valid_names:
                 setattr(group, k, v)
+            else:
+                warnings.warn(
+                    f"Unknown key in [app.{section_key}]: '{k}'", stacklevel=2,
+                )
 
 
 def reset() -> None:

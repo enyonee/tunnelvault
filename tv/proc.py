@@ -8,6 +8,7 @@ import time
 from typing import Callable, Optional, IO
 
 from tv.app_config import cfg
+from tv.i18n import t
 from tv.logger import Logger
 
 
@@ -66,28 +67,43 @@ def wait_for(
     logger: Optional[Logger] = None,
 ) -> bool:
     """Poll check_fn every second until True or timeout."""
-    print(f"  ⏳ Жду {desc}...")
+    print(f"  ⏳ {t('proc.waiting', desc=desc)}")
     if logger:
-        logger.log("WAIT", f"Ожидание '{desc}' (таймаут {timeout}с)")
+        logger.log("WAIT", f"Waiting for '{desc}' (timeout {timeout}s)")
     for i in range(1, timeout + 1):
         if check_fn():
             if logger:
-                logger.log("WAIT", f"'{desc}' готов за {i}с")
+                logger.log("WAIT", f"'{desc}' ready in {i}s")
             return True
         time.sleep(1)
     if logger:
-        logger.log("WAIT", f"'{desc}' ТАЙМАУТ ({timeout}с)")
+        logger.log("WAIT", f"'{desc}' TIMEOUT ({timeout}s)")
     return False
 
 
 def find_pids(pattern: str) -> list[int]:
-    """Find PIDs matching full command line (like pgrep -f)."""
+    """Find PIDs matching full command line (like pgrep -f).
+
+    Filters out own PID to prevent self-match.
+    """
     r = subprocess.run(
         ["pgrep", "-f", pattern],
         capture_output=True, text=True, timeout=cfg.timeouts.process,
     )
     if r.returncode == 0 and r.stdout.strip():
-        return [int(p) for p in r.stdout.strip().splitlines() if p.strip()]
+        own = os.getpid()
+        pids = []
+        for p in r.stdout.strip().splitlines():
+            p = p.strip()
+            if not p:
+                continue
+            try:
+                pid = int(p)
+            except ValueError:
+                continue
+            if pid != own:
+                pids.append(pid)
+        return pids
     return []
 
 

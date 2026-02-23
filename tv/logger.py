@@ -116,7 +116,7 @@ class Logger:
 
     def log_env(self, net: NetManager, script_dir: Path) -> None:
         """Snapshot environment at startup."""
-        self.log("ENV", "=== Снимок окружения ===")
+        self.log("ENV", "=== Environment snapshot ===")
         self.log("ENV", f"uname: {' '.join(plat.uname())}")
         try:
             user = os.getlogin()
@@ -126,14 +126,14 @@ class Logger:
         self.log("ENV", f"SCRIPT_DIR={script_dir}")
         self.log("ENV", f"PATH={os.environ.get('PATH', '')}")
 
-        self.log("ENV", "--- Сетевые интерфейсы ---")
+        self.log("ENV", "--- Network interfaces ---")
         for iface, addr in net.interfaces().items():
-            self.log("ENV", f"  {iface} → {addr}")
+            self.log("ENV", f"  {iface} -> {addr}")
 
-        self.log("ENV", "--- Таблица маршрутов (default) ---")
+        self.log("ENV", "--- Route table (default) ---")
         self.log_lines("ENV", net.route_table())
 
-        self.log("ENV", "--- Процессы VPN ---")
+        self.log("ENV", "--- VPN processes ---")
         from tv.vpn.registry import available_types, get_plugin
         vpn_keywords = []
         for t in available_types():
@@ -147,4 +147,4 @@ class Logger:
             if any(kw in line for kw in vpn_keywords) and "grep" not in line:
                 self.log("ENV", f"  {line.strip()}")
 
-        self.log("ENV", "=== /Снимок ===")
+        self.log("ENV", "=== /Snapshot ===")

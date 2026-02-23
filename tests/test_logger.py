@@ -60,8 +60,8 @@ class TestLoggerInverse:
         log = Logger(tmp_path / "test.log")
         log.log_env(mock_net, tmp_path)
         content = log.log_path.read_text()
-        assert "Снимок окружения" in content
-        assert "/Снимок" in content
+        assert "Environment snapshot" in content
+        assert "/Snapshot" in content
 
     def test_empty_message(self, tmp_path: Path):
         """Пустое сообщение - не падает."""

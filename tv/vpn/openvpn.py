@@ -8,6 +8,7 @@ from pathlib import Path
 
 from tv import proc, ui
 from tv.app_config import cfg
+from tv.i18n import t
 from tv.logger import Logger
 from tv.vpn.base import ConfigParam, TunnelPlugin, VPNResult
 from tv.vpn.registry import register
@@ -15,21 +16,21 @@ from tv.vpn.registry import register
 
 def _show_error(pid: int | None, log_path: Path, log: Logger) -> None:
     """Display OpenVPN error details to user and log."""
-    ui.fail(f"OpenVPN не подключился за {cfg.timeouts.openvpn_init}с")
-    log.log("ERROR", f"OpenVPN не подключился за {cfg.timeouts.openvpn_init}с")
+    ui.fail(t("vpn.ovpn.not_connected", timeout=cfg.timeouts.openvpn_init))
+    log.log("ERROR", f"OpenVPN did not connect within {cfg.timeouts.openvpn_init}s")
 
     details: list[tuple[str, str]] = []
     if pid and proc.is_alive(pid):
-        details.append(("", f"Процесс жив (PID={pid}), но интерфейс не появился"))
-        log.log("WARN", f"Процесс OpenVPN PID={pid} жив, но интерфейс не появился")
+        details.append(("", t("vpn.ovpn.alive_no_iface", pid=pid)))
+        log.log("WARN", f"OpenVPN PID={pid} alive but interface not found")
     elif pid:
-        details.append(("", f"Процесс завершился (PID={pid})"))
-        log.log("ERROR", f"Процесс OpenVPN PID={pid} завершился")
+        details.append(("", t("vpn.ovpn.exited", pid=pid)))
+        log.log("ERROR", f"OpenVPN PID={pid} exited")
     else:
-        details.append(("", "PID не найден после запуска"))
-        log.log("ERROR", "OpenVPN PID не найден после запуска")
+        details.append(("", t("vpn.ovpn.pid_not_found")))
+        log.log("ERROR", "OpenVPN PID not found after launch")
 
-    details.append(("", f"Лог: cat {log_path}"))
+    details.append(("", t("vpn.ovpn.log_hint", path=log_path)))
     ui.error_tree(details)
 
 
@@ -37,10 +38,15 @@ def _show_error(pid: int | None, log_path: Path, log: Logger) -> None:
 class OpenVPNPlugin(TunnelPlugin):
     """OpenVPN tunnel plugin with Tunnelblick detection."""
 
+    type_display_name = "OpenVPN"
     process_names = ["openvpn"]
     kill_patterns = [
         "openvpn --config .*/tunnelvault/",
     ]
+
+    @classmethod
+    def emergency_patterns(cls, script_dir) -> list[str]:
+        return [f"openvpn --config {script_dir}"]
 
     @classmethod
     def discover_pid(cls, tcfg, script_dir) -> int | None:
@@ -51,7 +57,7 @@ class OpenVPNPlugin(TunnelPlugin):
     @classmethod
     def config_schema(cls) -> list[ConfigParam]:
         return [
-            ConfigParam("config_file", "OpenVPN конфиг", default=cfg.defaults.openvpn_config,
+            ConfigParam("config_file", "param.ovpn_config", default=cfg.defaults.openvpn_config,
                          env_var="VPN_OVPN_CONFIG", target="config_file"),
         ]
 
@@ -67,33 +73,37 @@ class OpenVPNPlugin(TunnelPlugin):
         config_path = self.script_dir / self.cfg.config_file
         log_path = self._default_log_path()
 
-        self.log.log("INFO", f"Конфиг: {config_path}")
+        self.log.log("INFO", f"Config: {config_path}")
 
         # --- Tunnelblick detection ---
         if proc.find_pids("Tunnelblick"):
             tb_ovpn = proc.find_pids("Tunnelblick.*openvpn")
             if tb_ovpn:
                 pid = tb_ovpn[0]
-                ui.warn(f"Tunnelblick OpenVPN активен (PID={pid}), пропускаю свой OpenVPN")
-                self.log.log("WARN", f"Tunnelblick openvpn PID={pid}, пропускаем запуск")
-                ui.ok(f"OpenVPN подключен {ui.DIM}(Tunnelblick){ui.NC}")
-                self.log.log("INFO", "OpenVPN: используем Tunnelblick")
+                ui.warn(t("vpn.ovpn.tunnelblick_active", pid=pid))
+                self.log.log("WARN", f"Tunnelblick openvpn PID={pid}, skipping launch")
+                ui.ok(f"{t('vpn.ovpn.using_tunnelblick')}")
+                self.log.log("INFO", "OpenVPN: using Tunnelblick")
                 return VPNResult(ok=True, detail="Tunnelblick")
 
         # Snapshot interfaces BEFORE connect (for tun detection)
         ifaces_before = set(self.net.interfaces().keys())
 
         # --- Launch ---
-        self.log.log("INFO", f"Запуск: sudo openvpn --config {config_path} --daemon --log {log_path}")
+        self.log.log("INFO", f"Launch: sudo openvpn --config {config_path} --daemon --log {log_path}")
         proc.run(
             ["openvpn", "--config", str(config_path), "--daemon", "--log", str(log_path)],
             sudo=True,
         )
-        time.sleep(0.5)
 
-        # Find PID (openvpn --daemon forks, parent exits immediately)
-        pids = proc.find_pids(f"openvpn --config {config_path}")
-        pid = pids[0] if pids else None
+        # Find PID (openvpn --daemon forks; poll up to 1.5s for forked process)
+        pid = None
+        for _ in range(3):
+            time.sleep(0.5)
+            pids = proc.find_pids(f"openvpn --config {config_path}")
+            if pids:
+                pid = pids[0]
+                break
         self._pid = pid
 
         if pid:
@@ -115,14 +125,14 @@ class OpenVPNPlugin(TunnelPlugin):
                 if not self.cfg.interface:
                     self.cfg.interface = detected_iface
 
-                ui.ok(f"OpenVPN подключен ({detected_iface})")
-                self.log.log("INFO", f"OpenVPN подключен ({detected_iface})")
+                ui.ok(t("vpn.ovpn.connected", iface=detected_iface))
+                self.log.log("INFO", f"OpenVPN connected ({detected_iface})")
 
                 # Extra routes/DNS from TOML (beyond what .ovpn pushes)
                 self.add_routes()
                 self.setup_dns()
 
-                self.log.log("INFO", f"Маршруты после OpenVPN:\n{self.net.route_table()}")
+                self.log.log("INFO", f"Routes after OpenVPN:\n{self.net.route_table()}")
                 return VPNResult(ok=True, pid=pid)
 
         # --- Failed ---

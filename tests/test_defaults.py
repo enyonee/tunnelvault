@@ -151,7 +151,7 @@ class TestParseTunnelsValidation:
             "a": {"type": "fortivpn", "order": 1, "interface": "ppp0"},
             "b": {"type": "fortivpn", "order": 2, "interface": "ppp0"},
         }}
-        with pytest.raises(ValueError, match="один интерфейс"):
+        with pytest.raises(ValueError, match="same interface"):
             parse_tunnels(defs)
 
     def test_duplicate_log_rejected(self):
@@ -160,7 +160,7 @@ class TestParseTunnelsValidation:
             "a": {"type": "fortivpn", "order": 1, "log": "/tmp/shared.log"},
             "b": {"type": "openvpn", "order": 2, "log": "/tmp/shared.log"},
         }}
-        with pytest.raises(ValueError, match="один лог"):
+        with pytest.raises(ValueError, match="same log"):
             parse_tunnels(defs)
 
     def test_different_interfaces_ok(self):
@@ -220,7 +220,7 @@ class TestConfigFileDefaults:
             "b": {"type": "openvpn", "order": 2},
         }}
         tunnels = parse_tunnels(defs)
-        with pytest.raises(ValueError, match="один config_file"):
+        with pytest.raises(ValueError, match="same config_file"):
             validate_config_files(tunnels)
 
     def test_two_singbox_same_config_rejected(self):
@@ -230,7 +230,7 @@ class TestConfigFileDefaults:
             "b": {"type": "singbox", "order": 2},
         }}
         tunnels = parse_tunnels(defs)
-        with pytest.raises(ValueError, match="один config_file"):
+        with pytest.raises(ValueError, match="same config_file"):
             validate_config_files(tunnels)
 
     def test_two_singbox_different_configs_ok(self):
@@ -409,7 +409,7 @@ class TestValidateConfigFiles:
             TunnelConfig(name="a", type="singbox", config_file="sb.json"),
             TunnelConfig(name="b", type="singbox", config_file="sb.json"),
         ]
-        with pytest.raises(ValueError, match="один config_file"):
+        with pytest.raises(ValueError, match="same config_file"):
             validate_config_files(tunnels)
 
     def test_cross_type_same_config_ok(self):

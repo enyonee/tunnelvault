@@ -70,7 +70,7 @@ class TestRunAllFromTunnels:
         assert results[0].status == "ok"
         assert results[0].label == "google.com"
 
-    @patch("tv.checks._get_external_ip", return_value="1.2.3.4")
+    @patch("tv.checks.get_external_ip", return_value="1.2.3.4")
     def test_external_ip_check_ok(self, mock_ip, capsys):
         checks_cfg = {"external_ip_url": "https://ifconfig.me"}
         results, ext_ip = run_all_from_tunnels([("openvpn", True, checks_cfg)])
@@ -79,7 +79,7 @@ class TestRunAllFromTunnels:
         assert results[0].status == "ok"
         assert results[0].detail == "1.2.3.4"
 
-    @patch("tv.checks._get_external_ip", return_value=None)
+    @patch("tv.checks.get_external_ip", return_value=None)
     def test_external_ip_check_fail(self, mock_ip, capsys):
         checks_cfg = {"external_ip_url": "https://ifconfig.me"}
         results, ext_ip = run_all_from_tunnels([("openvpn", True, checks_cfg)])
@@ -87,7 +87,7 @@ class TestRunAllFromTunnels:
         assert ext_ip == ""
         assert results[0].status == "fail"
 
-    @patch("tv.checks._get_external_ip")
+    @patch("tv.checks.get_external_ip")
     def test_external_ip_skip_when_tunnel_down(self, mock_ip, capsys):
         checks_cfg = {"external_ip_url": "https://ifconfig.me"}
         results, _ = run_all_from_tunnels([("openvpn", False, checks_cfg)])
@@ -168,7 +168,7 @@ class TestRunAllFromTunnels:
         results, _ = run_all_from_tunnels([("vpn1", True, checks_cfg)])
 
         assert results[0].status == "fail"
-        assert results[0].detail == "не пингуется"
+        assert results[0].detail == "no ping"
 
     def test_ping_skip_when_tunnel_down(self, capsys):
         """Ping check skipped when tunnel is not ok."""

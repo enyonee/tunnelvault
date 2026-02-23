@@ -64,14 +64,22 @@ class TestLoad:
         # Other timeouts unchanged
         assert cfg.timeouts.process == 30
 
-    def test_unknown_keys_ignored(self):
-        load({"timeouts": {"nonexistent_key": 999}})
-        # No crash, no new attribute
+    def test_unknown_keys_warns(self):
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            load({"timeouts": {"nonexistent_key": 999}})
+        # No crash, no new attribute, but warns
         assert not hasattr(cfg.timeouts, "nonexistent_key")
+        assert any("nonexistent_key" in str(x.message) for x in w)
 
-    def test_unknown_section_ignored(self):
-        load({"fantasy": {"key": "val"}})
-        # No crash
+    def test_unknown_section_warns(self):
+        import warnings
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            load({"fantasy": {"key": "val"}})
+        # No crash, but warns
+        assert any("fantasy" in str(x.message) for x in w)
 
     def test_load_logging_section(self):
         load({"logging": {"level": "ERROR"}})

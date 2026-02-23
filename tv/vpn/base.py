@@ -26,7 +26,7 @@ class ConfigParam:
     """Declarative description of a single config parameter for a plugin."""
 
     key: str              # key in TunnelConfig.auth / .config_file / .extra
-    label: str            # UI label ("Хост FortiVPN")
+    label: str            # i18n key for UI label (e.g. "param.host")
     required: bool = False
     secret: bool = False
     default: str = ""
@@ -57,9 +57,13 @@ class TunnelConfig:
 class TunnelPlugin(ABC):
     """Base class for all tunnel plugins.
 
-    Each VPN type implements connect() and process_name.
+    Each VPN type implements connect() and the process_name property.
     Routes, DNS, disconnect get sensible defaults that can be overridden.
     """
+
+    # Human-readable name for the tunnel TYPE (used in proto line, no instance needed).
+    # Override in subclasses. Falls back to registry key if empty.
+    type_display_name: str = ""
 
     # Process names for emergency cleanup (without plugin instance).
     # Override in subclasses. Used by disconnect.run() to kill lingering processes.
@@ -71,12 +75,12 @@ class TunnelPlugin(ABC):
 
     def __init__(
         self,
-        cfg: TunnelConfig,
+        tcfg: TunnelConfig,
         net: NetManager,
         log: Logger,
         script_dir: Path,
     ) -> None:
-        self.cfg = cfg
+        self.cfg = tcfg
         self.net = net
         self.log = log
         self.script_dir = script_dir
@@ -95,6 +99,16 @@ class TunnelPlugin(ABC):
         Override in subclasses with type-specific pgrep patterns.
         """
         return None
+
+    @classmethod
+    def emergency_patterns(cls, script_dir: Path) -> list[str]:
+        """Patterns for emergency process kill (no tunnel configs available).
+
+        Returns patterns specific to this script_dir so only processes
+        started by THIS tunnelvault instance are killed.
+        Override in subclasses. Falls back to kill_patterns.
+        """
+        return cls.kill_patterns
 
     @abstractmethod
     def connect(self) -> VPNResult:
@@ -132,8 +146,8 @@ class TunnelPlugin(ABC):
             time.sleep(cfg.timeouts.pid_kill_interval)
         self.log.log(
             "WARN",
-            f"{self.process_name} PID={self._pid} не завершился за "
-            f"{cfg.timeouts.pid_kill}с, pattern fallback",
+            f"{self.process_name} PID={self._pid} did not exit within "
+            f"{cfg.timeouts.pid_kill}s, pattern fallback",
         )
         return False
 
@@ -186,7 +200,7 @@ class TunnelPlugin(ABC):
             for domain, ok in results.items():
                 self.log.log(
                     "INFO" if ok else "WARN",
-                    f"Resolver для {domain} {'создан' if ok else 'FAIL'}",
+                    f"Resolver for {domain} {'created' if ok else 'FAIL'}",
                 )
 
     def cleanup_dns(self) -> None:

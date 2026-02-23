@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 
 from typing import TYPE_CHECKING
 
+from tv.i18n import t
+
 if TYPE_CHECKING:
     from tv.vpn.base import TunnelConfig
 
@@ -23,43 +25,43 @@ class ParsedTargets:
     domains: list[str] = field(default_factory=list)
 
 
-def validate_target(t: str) -> tuple[str, str]:
+def validate_target(target: str) -> tuple[str, str]:
     """Validate a single target string.
 
     Returns (type, error):
         type: "network" | "host" | "domain" | "hostname" | "" (if invalid)
         error: human-readable error or "" if valid
     """
-    t = t.strip()
-    if not t:
+    target = target.strip()
+    if not target:
         return "", ""
 
-    m = _WILDCARD_RE.match(t)
+    m = _WILDCARD_RE.match(target)
     if m:
         domain = m.group(1)
         if "." not in domain:
-            return "", f"*.{domain} - домен должен содержать точку (*.example.local)"
+            return "", t("routing.wildcard_no_dot", domain=domain)
         return "domain", ""
 
-    if _CIDR_RE.match(t):
+    if _CIDR_RE.match(target):
         try:
-            ipaddress.ip_network(t, strict=False)
+            ipaddress.ip_network(target, strict=False)
         except ValueError:
-            return "", f"{t} - невалидный CIDR"
+            return "", t("routing.invalid_cidr", target=target)
         return "network", ""
 
-    if _IP_RE.match(t):
+    if _IP_RE.match(target):
         try:
-            ipaddress.ip_address(t)
+            ipaddress.ip_address(target)
         except ValueError:
-            return "", f"{t} - невалидный IP-адрес"
+            return "", t("routing.invalid_ip", target=target)
         return "host", ""
 
     # Bare hostname - basic validation
-    if re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$", t):
+    if re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]*[a-zA-Z0-9])?)*$", target):
         return "hostname", ""
 
-    return "", f"{t} - нераспознанный формат"
+    return "", t("routing.unrecognized", target=target)
 
 
 def parse_targets(targets: list[str]) -> ParsedTargets:

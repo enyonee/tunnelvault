@@ -12,10 +12,13 @@ from tv.net import NetManager
 
 
 @pytest.fixture(autouse=True)
-def _reset_app_config():
+def _pin_locale_and_reset():
+    from tv import i18n
+    i18n.init("en")
     yield
     from tv.app_config import reset
     reset()
+    i18n.reset()
 
 
 # Ensure all VPN plugins are registered for the entire test suite.
@@ -57,4 +60,5 @@ def mock_net() -> MagicMock:
     net.ppp_peer.return_value = ""
     net.resolve_host.return_value = ["1.2.3.4"]
     net.cleanup_dns_resolver.return_value = None
+    net.cleanup_local_dns_resolvers.return_value = []
     return net

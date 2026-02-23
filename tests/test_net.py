@@ -106,9 +106,31 @@ class TestDarwinNetInverse:
 
     @patch("subprocess.run")
     def test_empty_interfaces_on_error(self, mock_run, darwin_net):
-        """ifconfig -l фейлится - пустой dict."""
+        """ifconfig -a фейлится - пустой dict."""
         mock_run.return_value = subprocess.CompletedProcess([], 1, "", "")
         assert darwin_net.interfaces() == {}
+
+    @patch("subprocess.run")
+    def test_interfaces_parses_ifconfig_a(self, mock_run, darwin_net):
+        """ifconfig -a: парсит несколько интерфейсов за один вызов."""
+        mock_run.return_value = subprocess.CompletedProcess(
+            [], 0,
+            "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n"
+            "\tinet 127.0.0.1 netmask 0xff000000\n"
+            "en0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n"
+            "\tether aa:bb:cc:dd:ee:ff\n"
+            "\tinet6 fe80::1%en0\n"
+            "\tinet 192.168.1.5 netmask 0xffffff00 broadcast 192.168.1.255\n"
+            "ppp0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1500\n"
+            "\tinet 10.0.0.2 --> 10.0.0.1 netmask 0xffffffff\n",
+            "",
+        )
+        ifaces = darwin_net.interfaces()
+        assert ifaces["lo0"] == "127.0.0.1"
+        assert ifaces["en0"] == "192.168.1.5"
+        assert ifaces["ppp0"] == "10.0.0.2"
+        # Single subprocess call (not N+1)
+        assert mock_run.call_count == 1
 
     @patch("subprocess.run")
     def test_route_table_empty_on_error(self, mock_run, darwin_net):

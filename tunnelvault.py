@@ -1,15 +1,5 @@
 #!/usr/bin/env python3
-"""tunnelvault - multi-VPN connection manager.
-
-Подключает VPN-туннели (OpenVPN, FortiVPN, sing-box и др.) с правильной
-маршрутизацией и проверяет доступность всех сервисов.
-
-Использование:
-    python3 tunnelvault.py                  - интерактивный wizard
-    python3 tunnelvault.py --disconnect     - отключить всё
-
-Приоритет конфигурации: defaults.toml -> ENV -> .vpn-settings.json -> wizard
-"""
+"""tunnelvault - multi-VPN connection manager."""
 
 from __future__ import annotations
 
@@ -20,12 +10,15 @@ import sys
 import traceback
 from pathlib import Path
 
-from tv import config, ui, disconnect
+from tv import config, ui, disconnect, checks, proc
 from tv.config import SetupRequiredError
 from tv import defaults as defaults_mod
 from tv.app_config import cfg
 from tv.engine import Engine
+from tv.i18n import t
 from tv.logger import Logger
+from tv.vpn.base import TunnelConfig
+from tv.vpn.registry import get_plugin
 # Ensure all plugins are registered on import
 from tv.vpn import openvpn, fortivpn, singbox  # noqa: F401
 
@@ -37,40 +30,107 @@ def main() -> None:
     global _log
     args = config.parse_args()
     script_dir = Path(__file__).parent.resolve()
+
+    # Mutual exclusion check
+    exclusive = [
+        args.disconnect, args.status, args.check, args.reset,
+        args.validate, args.logs is not None, args.watch,
+    ]
+    if sum(bool(x) for x in exclusive) > 1:
+        ui.fail(t("main.one_command"))
+        sys.exit(1)
+
+    # --- Commands without defaults.toml ---
+
+    if args.reset:
+        disconnect.run(defs={}, script_dir=script_dir)
+        return
+
+    if args.status:
+        from tv import status
+        status.run()
+        return
+
+    if args.watch:
+        tunnel_names = _try_load_tunnel_names(script_dir, args.only)
+        from tv import watch
+        watch.run(tunnel_names=tunnel_names)
+        return
+
+    # --- Commands that need defaults.toml ---
+
     defs = defaults_mod.load(script_dir)
+
+    # Initialize i18n from config (after defaults.toml loaded [app].locale)
+    from tv import i18n
+    if cfg.locale:
+        i18n.init(cfg.locale)
 
     # CLI --log-level overrides config
     if args.log_level:
         cfg.logging.level = args.log_level
 
-    # --- Disconnect-only mode (no Engine needed, net created inside) ---
+    if args.validate:
+        from tv import validate as validate_mod
+        sys.exit(0 if validate_mod.run(defs, script_dir) else 1)
+
     if args.disconnect:
         tunnels = defaults_mod.parse_tunnels(defs)
+        try:
+            if args.only:
+                tunnels = defaults_mod.filter_tunnels(tunnels, args.only)
+        except ValueError as e:
+            ui.fail(str(e))
+            sys.exit(1)
         if tunnels:
             disconnect.run_plugins(tunnels, defs=defs)
         else:
-            disconnect.run(defs=defs)
+            disconnect.run(defs=defs, script_dir=script_dir)
         return
 
-    # --- Engine ---
+    if args.check:
+        tunnels = defaults_mod.parse_tunnels(defs)
+        config.resolve_log_paths(tunnels, script_dir)
+        try:
+            if args.only:
+                tunnels = defaults_mod.filter_tunnels(tunnels, args.only)
+        except ValueError as e:
+            ui.fail(str(e))
+            sys.exit(1)
+        _run_check_only(tunnels, script_dir)
+        return
+
+    if args.logs is not None:
+        tunnels = defaults_mod.parse_tunnels(defs)
+        config.resolve_log_paths(tunnels, script_dir)
+        _run_logs(tunnels, args.logs, script_dir)
+        return
+
+    # --- Engine (connect) ---
     engine = Engine(script_dir, defs, debug=args.debug)
     _log = engine.log
 
     # --- Signal handlers ---
+    _handling_signal = False
+
     def on_signal(sig: int, _frame) -> None:
+        nonlocal _handling_signal
+        if _handling_signal:
+            sys.exit(128 + sig)
+        _handling_signal = True
         name = signal.Signals(sig).name
-        print(f"\n  {ui.YELLOW}{ui.BOLD}⚠ Прервано ({name}){ui.NC}", file=sys.stderr)
-        engine.log.log("WARN", f"Прервано по {name}")
-        print(f"  {ui.DIM}Очистка VPN-процессов...{ui.NC}", file=sys.stderr)
+        print(f"\n  {ui.YELLOW}{ui.BOLD}⚠ {t('main.interrupted', name=name)}{ui.NC}", file=sys.stderr)
+        engine.log.log("WARN", f"Interrupted by {name}")
+        print(f"  {ui.DIM}{t('main.cleaning_vpn')}{ui.NC}", file=sys.stderr)
         try:
             engine.disconnect_all()
         except Exception:
-            # Fallback: emergency killall if engine state is broken
+            # Fallback: emergency kill if engine state is broken
             try:
-                disconnect.run(engine.net, engine.log, defs)
-            except Exception:
-                pass
-        print(f"  {ui.DIM}Лог: {engine.log.log_path}{ui.NC}", file=sys.stderr)
+                disconnect.run(engine.net, engine.log, defs, script_dir=script_dir)
+            except Exception as exc:
+                print(f"  {ui.DIM}cleanup error: {exc}{ui.NC}", file=sys.stderr)
+        print(f"  {ui.DIM}{t('main.log_colon', path=engine.log.log_path)}{ui.NC}", file=sys.stderr)
         sys.exit(128 + sig)
 
     signal.signal(signal.SIGINT, on_signal)
@@ -80,11 +140,20 @@ def main() -> None:
     ui.logo()
 
     engine.log.log("INFO", "=" * 40)
-    engine.log.log("INFO", f"tunnelvault запущен (PID={os.getpid()})")
-    engine.log.log("INFO", f"Командная строка: {' '.join(sys.argv)}")
+    engine.log.log("INFO", f"tunnelvault started (PID={os.getpid()})")
+    engine.log.log("INFO", f"Command line: {' '.join(sys.argv)}")
     engine.log.log_env(engine.net, script_dir)
 
     engine.prepare(setup=args.setup)
+
+    # --only filter after prepare (tunnels resolved)
+    try:
+        if args.only:
+            engine.tunnels = defaults_mod.filter_tunnels(engine.tunnels, args.only)
+    except ValueError as e:
+        ui.fail(str(e))
+        sys.exit(1)
+
     engine.setup(clear=args.clear)
     engine.connect_all()
     check_results, ext_ip = engine.check_all()
@@ -93,17 +162,121 @@ def main() -> None:
     _log_summary(engine, check_results, ext_ip)
 
 
+def _try_load_tunnel_names(
+    script_dir: Path, only: str | None = None,
+) -> dict[str, str]:
+    """Best-effort: map interface -> tunnel name from defaults.toml."""
+    try:
+        try:
+            import tomllib
+        except ModuleNotFoundError:
+            import tomli as tomllib  # type: ignore[no-redef]
+
+        path = script_dir / cfg.paths.defaults_file
+        if not path.exists():
+            return {}
+
+        with open(path, "rb") as f:
+            data = tomllib.load(f)
+
+        from tv import app_config
+        app_config.load(data.get("app", {}))
+
+        tunnels = defaults_mod.parse_tunnels(data)
+        if only:
+            tunnels = defaults_mod.filter_tunnels(tunnels, only)
+
+        return {t_.interface: t_.name for t_ in tunnels if t_.interface}
+    except Exception:
+        return {}
+
+
+def _run_check_only(tunnels: list[TunnelConfig], script_dir: Path) -> None:
+    """Run health checks on existing connections without (re)connecting."""
+    print(f"\n  {ui.BOLD}{t('main.check_title')}{ui.NC}")
+
+    check_input = []
+    for tcfg in tunnels:
+        try:
+            plugin_cls = get_plugin(tcfg.type)
+            pid = plugin_cls.discover_pid(tcfg, script_dir)
+            is_running = pid is not None and proc.is_alive(pid)
+        except Exception:
+            is_running = False
+
+        status_str = f"PID {pid}" if is_running else t("main.not_found")
+        icon = ui.GREEN + "●" + ui.NC if is_running else ui.RED + "○" + ui.NC
+        print(f"  {icon} {tcfg.name}: {status_str}")
+        check_input.append((tcfg.name, is_running, tcfg.checks))
+
+    results, ext_ip = checks.run_all_from_tunnels(check_input)
+
+    # Print compact summary
+    passed = sum(1 for r in results if r.status == "ok")
+    failed = sum(1 for r in results if r.status == "fail")
+    skipped = sum(1 for r in results if r.status == "skip")
+    print(f"\n  {t('main.total', passed=f'{ui.GREEN}{passed}{ui.NC}', failed=f'{ui.RED}{failed}{ui.NC}', skipped=f'{ui.DIM}{skipped}{ui.NC}')}")
+
+    if ext_ip:
+        print(f"  {t('main.external_ip', ip=ext_ip)}")
+    print()
+
+
+def _run_logs(
+    tunnels: list[TunnelConfig], name: str, script_dir: Path,
+) -> None:
+    """Show log paths or tail a specific log."""
+    log_dir = config.resolve_log_dir(script_dir)
+    main_log = str(log_dir / cfg.paths.main_log)
+
+    # Build available logs map
+    available: dict[str, str] = {}
+    for tcfg in tunnels:
+        if tcfg.log:
+            available[tcfg.name] = tcfg.log
+    available["debug"] = main_log
+    available["main"] = main_log
+
+    if not name:
+        # List all log paths
+        print(f"\n  {ui.BOLD}{t('main.log_files')}{ui.NC}\n")
+        for log_name, path in available.items():
+            if log_name == "main":
+                continue  # "main" is alias for "debug"
+            prefix = "cat" if log_name == "debug" else "sudo cat"
+            print(f"    {log_name:<15s} {prefix} {path}")
+        print()
+        print(f"  {ui.DIM}{t('main.log_tail_hint')}{ui.NC}")
+        print()
+        return
+
+    if name not in available:
+        names_list = ", ".join(
+            n for n in sorted(available) if n != "main"
+        )
+        ui.fail(t("main.unknown_log", name=name, available=names_list))
+        sys.exit(1)
+
+    path = available[name]
+    if not Path(path).exists():
+        ui.fail(t("main.file_not_found", path=path))
+        sys.exit(1)
+
+    print(f"  {ui.DIM}tail -f {path}{ui.NC}\n")
+    os.execlp("tail", "tail", "-f", path)
+
+
 def _log_summary(engine: Engine, check_results: list, ext_ip: str) -> None:
     """Log results and print summary."""
-    engine.log.log("INFO", "=== Итог ===")
+    engine.log.log("INFO", "=== Summary ===")
     for tcfg, r in zip(engine.tunnels, engine.results):
         engine.log.log("INFO", f"{tcfg.name}: ok={r.ok}")
-    engine.log.log("INFO", f"Лог: {engine.log.log_path}")
+    engine.log.log("INFO", f"Log: {engine.log.log_path}")
     engine.log.log("INFO", "=" * 40)
 
     summary_tunnels = []
     for tcfg, r in zip(engine.tunnels, engine.results):
-        detail = r.detail or ("up" if r.ok else "не подключен")
+        detail = r.detail or ("up" if r.ok else t("main.not_connected"))
         if tcfg.type == "openvpn" and r.ok and ext_ip:
             detail = detail if detail != "up" else ext_ip
         summary_tunnels.append((tcfg.name, r.ok, detail))
@@ -123,18 +296,21 @@ def _log_summary(engine: Engine, check_results: list, ext_ip: str) -> None:
 
 def _crash_diagnostics(log: Logger | None, exc: BaseException) -> None:
     """Log crash state for post-mortem debugging."""
-    print(f"\n  {ui.RED}{ui.BOLD}💥 Скрипт упал{ui.NC}", file=sys.stderr)
+    print(f"\n  {ui.RED}{ui.BOLD}💥 {t('main.crashed')}{ui.NC}", file=sys.stderr)
     print(f"  {ui.RED}├─ {type(exc).__name__}: {exc}{ui.NC}", file=sys.stderr)
     if log:
-        print(f"  {ui.RED}└─ Лог: {log.log_path}{ui.NC}", file=sys.stderr)
+        print(f"  {ui.RED}└─ {t('main.log_colon', path=log.log_path)}{ui.NC}", file=sys.stderr)
         log.log("FATAL", f"{type(exc).__name__}: {exc}")
         log.log("FATAL", traceback.format_exc())
         from tv.vpn.registry import available_types, get_plugin
         vpn_keywords = []
-        for t in available_types():
-            vpn_keywords.extend(get_plugin(t).process_names)
+        for tp in available_types():
+            vpn_keywords.extend(get_plugin(tp).process_names)
 
-        r = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+        r = subprocess.run(
+            ["ps", "aux"], capture_output=True, text=True,
+            timeout=cfg.timeouts.ps_aux,
+        )
         for line in r.stdout.splitlines():
             if any(kw in line for kw in vpn_keywords):
                 log.log("FATAL", f"  {line.strip()}")

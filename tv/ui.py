@@ -19,6 +19,7 @@ DIM = "\033[2m"
 NC = "\033[0m"
 
 from tv.app_config import cfg
+from tv.i18n import t
 
 _ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
@@ -55,15 +56,15 @@ def info(msg: str) -> None:
 
 def param_found(label: str, value: str, source: str, secret: bool = False) -> None:
     display = "****" if secret else f"{YELLOW}{value}{NC}"
-    print(f"  {GREEN}✅{NC} {label}: {DIM}({source}){NC} {display}")
+    print(f"  {GREEN}✅{NC} {t(label)}: {DIM}({source}){NC} {display}")
 
 
 def param_missing(label: str) -> None:
-    print(f"  {RED}—{NC}  {label}: {DIM}(не задано){NC}")
+    print(f"  {RED}—{NC}  {t(label)}: {DIM}({t('ui.not_set')}){NC}")
 
 
 def error_tree(lines: list[tuple[str, str]]) -> None:
-    """Print indented error details with tree characters (├─ / └─)."""
+    """Print indented error details with tree characters."""
     for i, (icon, msg) in enumerate(lines):
         connector = "└─" if i == len(lines) - 1 else "├─"
         print(f"  {YELLOW}{connector}{NC} {msg}")
@@ -74,9 +75,9 @@ def error_tree(lines: list[tuple[str, str]]) -> None:
 def wizard_input(label: str, default: str = "", secret: bool = False) -> str:
     """Interactive prompt for missing config values."""
     if default and not secret:
-        prompt = f"     {CYAN}↳{NC} Введите [{YELLOW}{default}{NC}]: "
+        prompt = f"     {CYAN}↳{NC} {t('ui.enter_default', default=default)}"
     else:
-        prompt = f"     {CYAN}↳{NC} Введите: "
+        prompt = f"     {CYAN}↳{NC} {t('ui.enter')}"
 
     if secret:
         # getpass reads from /dev/tty, handles echo suppression
@@ -97,18 +98,18 @@ def wizard_targets(tunnel_name: str) -> list[str]:
     """Wizard prompt for tunnel targets with validation and retry."""
     from tv.routing import validate_target
 
-    section(f"Маршруты: {tunnel_name}")
-    print(f"  Хосты и сети через этот туннель {DIM}(через запятую){NC}")
-    print(f"  {DIM}Пусто = нативный роутинг (VPN сам решает маршруты){NC}")
-    print(f"  {DIM}Форматы:{NC}")
-    print(f"  {DIM}  10.0.0.0/8        - подсеть (CIDR){NC}")
-    print(f"  {DIM}  192.168.1.1       - IP-адрес{NC}")
-    print(f"  {DIM}  *.internal.lan    - домен (wildcard → DNS){NC}")
-    print(f"  {DIM}  git.myhost.com   - хост (резолв при подключении){NC}")
+    section(t("ui.routes_title", name=tunnel_name))
+    print(f"  {t('ui.routes_desc')} {DIM}{t('ui.routes_comma')}{NC}")
+    print(f"  {DIM}{t('ui.routes_empty')}{NC}")
+    print(f"  {DIM}{t('ui.routes_fmt_title')}{NC}")
+    print(f"  {DIM}  {t('ui.routes_fmt_cidr')}{NC}")
+    print(f"  {DIM}  {t('ui.routes_fmt_ip')}{NC}")
+    print(f"  {DIM}  {t('ui.routes_fmt_wildcard')}{NC}")
+    print(f"  {DIM}  {t('ui.routes_fmt_host')}{NC}")
 
     while True:
         raw = wizard_input("Targets")
-        items = [t.strip() for t in raw.split(",") if t.strip()]
+        items = [t_.strip() for t_ in raw.split(",") if t_.strip()]
         if not items:
             return []
 
@@ -125,7 +126,7 @@ def wizard_targets(tunnel_name: str) -> list[str]:
 
         for err in errors:
             print(f"  {RED}✗{NC}  {err}")
-        print(f"  {YELLOW}Исправьте и введите заново{NC}")
+        print(f"  {YELLOW}{t('ui.fix_retry')}{NC}")
 
 
 def _show_targets_summary(items: list[str]) -> None:
@@ -133,10 +134,10 @@ def _show_targets_summary(items: list[str]) -> None:
     from tv.routing import validate_target
 
     type_icons = {
-        "network": ("📡", "подсеть"),
-        "host": ("🖥 ", "IP"),
-        "domain": ("🌐", "домен"),
-        "hostname": ("🔗", "хост"),
+        "network": ("📡", t("ui.target_network")),
+        "host": ("🖥 ", t("ui.target_host")),
+        "domain": ("🌐", t("ui.target_domain")),
+        "hostname": ("🔗", t("ui.target_hostname")),
     }
     for item in items:
         kind, _ = validate_target(item)
@@ -149,11 +150,11 @@ def wizard_nameservers(domains: list[str]) -> list[str]:
     import ipaddress
 
     domain_list = ", ".join(domains)
-    print(f"  DNS серверы для доменов {BOLD}{domain_list}{NC}:")
-    print(f"  {DIM}(IP-адреса через запятую, пусто = пропуск){NC}")
+    print(f"  {t('ui.dns_servers_for', domains=domain_list)}")
+    print(f"  {DIM}{t('ui.dns_comma')}{NC}")
 
     while True:
-        raw = wizard_input("DNS серверы")
+        raw = wizard_input("DNS")
         items = [s.strip() for s in raw.split(",") if s.strip()]
         if not items:
             return []
@@ -163,14 +164,14 @@ def wizard_nameservers(domains: list[str]) -> list[str]:
             try:
                 ipaddress.ip_address(item)
             except ValueError:
-                errors.append(f"{item} - невалидный IP-адрес")
+                errors.append(t("ui.invalid_ip", item=item))
 
         if not errors:
             return items
 
         for err in errors:
             print(f"  {RED}✗{NC}  {err}")
-        print(f"  {YELLOW}Исправьте и введите заново{NC}")
+        print(f"  {YELLOW}{t('ui.fix_retry')}{NC}")
 
 
 # --- Logo ---
@@ -183,14 +184,15 @@ def logo() -> None:
 
     R = NC
 
-    # Gradient bar: teal → indigo → purple → crimson (52 visible chars)
+    # Circuit-board bar: teal -> cyan -> green -> yellow -> orange -> red
     bar = (
-        f"  {_c(24)}░░▒▒{_c(30)}▓▓████{_c(37)}████████"
-        f"{_c(61)}████████{_c(97)}████████"
-        f"{_c(131)}████████{_c(88)}████▓▓{_c(52)}▒▒░░{R}"
+        f"  {_c(23)}░░{_c(29)}▒▒{_c(30)}▓▓{_c(37)}██{_c(43)}██{_c(49)}██"
+        f"{_c(48)}████{_c(83)}████{_c(118)}████"
+        f"{_c(220)}████{_c(214)}████{_c(208)}████"
+        f"{_c(202)}██{_c(196)}██{_c(160)}▓▓{_c(124)}▒▒{_c(88)}░░{R}"
     )
 
-    # TUNNEL (teal gradient: dark → light)
+    # TUNNEL (teal -> cyan -> green gradient, matching PNG)
     tunnel = [
         "████████╗██╗   ██╗███╗  ██╗███╗  ██╗███████╗██╗  ",
         "╚══██╔══╝██║   ██║████╗ ██║████╗ ██║██╔════╝██║  ",
@@ -199,9 +201,9 @@ def logo() -> None:
         "   ██║   ╚██████╔╝██║ ╚███║██║ ╚███║███████╗█████╗",
         "   ╚═╝    ╚═════╝ ╚═╝  ╚══╝╚═╝  ╚══╝╚══════╝╚════╝",
     ]
-    t_colors = [_c(24), _c(24), _c(30), _c(30), _c(37), _c(37)]
+    t_colors = [_c(30), _c(36), _c(37), _c(43), _c(49), _c(48)]
 
-    # VAULT (crimson gradient: dark → light)
+    # VAULT (yellow -> orange -> red gradient, matching PNG)
     vault = [
         "██╗   ██╗ █████╗ ██╗   ██╗██╗  ████████╗",
         "██║   ██║██╔══██╗██║   ██║██║  ╚══██╔══╝",
@@ -210,13 +212,30 @@ def logo() -> None:
         " ╚████╔╝ ██║  ██║╚██████╔╝██████╗██║   ",
         "  ╚═══╝  ╚═╝  ╚═╝ ╚═════╝ ╚═════╝╚═╝   ",
     ]
-    v_colors = [_c(88), _c(88), _c(124), _c(124), _c(131), _c(131)]
+    v_colors = [_c(220), _c(214), _c(208), _c(202), _c(196), _c(160)]
 
-    # Ornamental divider (centered within 50-char TUNNEL width)
-    div = f"{_c(61)}═══════════╡{R} {_c(130)}◆{R} {_c(61)}╞═══════════{R}"
+    # Circuit-board divider with node dots
+    div = (
+        f"{_c(37)}■─{_c(43)}──{_c(49)}──┤{R}"
+        f" {_c(226)}◆{R} "
+        f"{_c(214)}├──{_c(208)}──{_c(196)}─■{R}"
+    )
+
+    # Circuit-board decorative nodes
+    nodes_top = (
+        f"  {_c(30)}□─┐  {_c(37)}■  {_c(43)}□──■{R}"
+        f"                        "
+        f"{_c(214)}■──□  {_c(208)}■  {_c(196)}┌─□{R}"
+    )
+    nodes_bot = (
+        f"  {_c(30)}■──□  {_c(43)}┌─■{R}"
+        f"                              "
+        f"{_c(208)}■─┐  {_c(196)}□──■{R}"
+    )
 
     print()
     print(bar)
+    print(nodes_top)
     print()
     for line, c in zip(tunnel, t_colors):
         print(f"    {c}{line}{R}")
@@ -226,9 +245,9 @@ def logo() -> None:
     for line, c in zip(vault, v_colors):
         print(f"         {c}{line}{R}")
     print()
-    ver_text = f"v{__version__} · multi-VPN connection manager"
-    ver_pad = 4 + max(0, (50 - len(ver_text)) // 2)
-    print(f"{' ' * ver_pad}{_c(109)}v{__version__}{R} {_c(240)}·{R} {_c(243)}multi-VPN connection manager{R}")
+    print(nodes_bot)
+    ver_pad = 4 + max(0, (50 - len(f"v{__version__} · multi-VPN connection manager")) // 2)
+    print(f"{' ' * ver_pad}{_c(83)}v{__version__}{R} {_c(240)}·{R} {_c(243)}multi-VPN connection manager{R}")
     # Dynamic protocol line from registry
     proto_line = _build_proto_line()
     print(f"{' ' * 12}{proto_line}")
@@ -256,8 +275,8 @@ def _build_proto_line() -> str:
         color = colors[i % len(colors)]
         try:
             plugin_cls = get_plugin(type_name)
-            display = plugin_cls.display_name.fget(plugin_cls)
-        except (KeyError, TypeError, AttributeError):
+            display = plugin_cls.type_display_name or type_name
+        except KeyError:
             display = type_name
         parts.append(f"{color}▸{R} {_c(243)}{display}{R}")
 
@@ -304,10 +323,10 @@ def print_summary(
 
     print()
     _box("┏", "┓")
-    _center("ИТОГ ПОДКЛЮЧЕНИЯ")
+    _center(t("ui.summary_title"))
     _box("┣", "┫")
 
-    _header("ТУННЕЛИ")
+    _header(t("ui.tunnels"))
     _row()
     for name, is_ok, detail in tunnels:
         icon = "✅" if is_ok else "❌"
@@ -316,7 +335,7 @@ def print_summary(
     _row()
     _box("┣", "┫")
 
-    _header(f"ПРОВЕРКИ  {passed}/{total}")
+    _header(t("ui.checks_header", passed=passed, total=total))
     _row()
     for label, status, detail in checks:
         # Fallback results get a distinct icon
@@ -329,7 +348,7 @@ def print_summary(
     _row()
     _box("┣", "┫")
 
-    _header("ЛОГИ")
+    _header(t("ui.logs"))
     _row()
     for name, path in log_paths.items():
         prefix = "cat" if name == "debug" else "sudo cat"

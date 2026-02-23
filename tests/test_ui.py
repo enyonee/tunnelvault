@@ -44,9 +44,9 @@ class TestPrintSummary:
             log_paths={"forti": "/tmp/forti.log", "debug": "/tmp/debug.log"},
         )
         out = capsys.readouterr().out
-        assert "ИТОГ ПОДКЛЮЧЕНИЯ" in out
+        assert "CONNECTION SUMMARY" in out
         assert "FortiVPN" in out
-        assert "ПРОВЕРКИ" in out
+        assert "CHECKS" in out
         assert "1/3" in out  # passed считает только "ok" (skip не в счёт)
 
     def test_all_ok_shows_correct_count(self, capsys):
