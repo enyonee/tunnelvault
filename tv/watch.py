@@ -8,8 +8,14 @@ Displays per-tunnel bandwidth and TCP connections using platform tools:
 from __future__ import annotations
 
 import platform
+import socket
 import subprocess
+import sys
+import termios
+import threading
 import time
+import tty
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
@@ -87,6 +93,51 @@ def _port_label(addr: str) -> str:
         return _PORT_LABELS.get(int(port_s), "")
     except ValueError:
         return ""
+
+
+class _DNSCache:
+    """Non-blocking reverse DNS cache with background resolution."""
+
+    def __init__(self, max_workers: int = 4) -> None:
+        self._cache: dict[str, str | None] = {}  # ip -> hostname | None (pending)
+        self._lock = threading.Lock()
+        self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="rdns")
+
+    def get(self, ip: str) -> str:
+        """Get hostname for IP. Returns IP immediately if not yet resolved."""
+        with self._lock:
+            if ip in self._cache:
+                val = self._cache[ip]
+                return val if val is not None else ip
+            self._cache[ip] = None  # mark as pending
+
+        self._pool.submit(self._resolve, ip)
+        return ip
+
+    def _resolve(self, ip: str) -> None:
+        try:
+            host, _, _ = socket.gethostbyaddr(ip)
+            if len(host) > 40:
+                host = host[:37] + "..."
+        except (socket.herror, socket.gaierror, OSError):
+            host = ip
+        with self._lock:
+            self._cache[ip] = host
+
+    def shutdown(self) -> None:
+        self._pool.shutdown(wait=False)
+
+
+_dns_cache = _DNSCache()
+
+
+def _fmt_remote(addr: str) -> str:
+    """Format remote address: resolve IP to hostname if possible."""
+    ip, _, port = addr.rpartition(":")
+    host = _dns_cache.get(ip)
+    if host != ip:
+        return f"{host}:{port}"
+    return addr
 
 
 def _is_vpn_iface(name: str) -> bool:
@@ -248,6 +299,7 @@ def _linux_connections(local_ips: set[str]) -> list[Connection]:
 def _build_display(
     snapshots: list[TunnelSnapshot],
     ts: datetime,
+    poll_ms: float = 0,
 ) -> Panel:
     """Build the full watch display panel."""
     renderables: list = []
@@ -293,9 +345,10 @@ def _build_display(
         if shown:
             for c in shown:
                 st = "green" if "ESTAB" in c.state else "yellow"
+                remote_display = _fmt_remote(c.remote)
                 ct.add_row(
                     c.local, "→",
-                    f"[yellow]{c.remote}[/yellow]",
+                    f"[yellow]{remote_display}[/yellow]",
                     f"[{st}]{c.state}[/{st}]",
                     _port_label(c.remote),
                 )
@@ -314,31 +367,79 @@ def _build_display(
             Panel(ct, title=title, subtitle=sub, border_style="dim")
         )
 
-    renderables.append(Text(
-        f"  {ts.strftime('%H:%M:%S')}  {t('watch.exit_hint')}", style="dim",
-    ))
+    n_tunnels = len(snapshots)
+    n_conns = sum(len(s.connections) for s in snapshots)
+    title = (
+        f"[bold bright_blue]tunnelvault watch[/bold bright_blue]"
+        f"  [dim]{ts.strftime('%H:%M:%S')} │ {n_tunnels} tunnels │ {n_conns} conn │ {poll_ms:.0f}ms │ {t('watch.exit_hint')}[/dim]"
+    )
 
-    return Panel(
+    panel = Panel(
         Group(*renderables),
-        title="[bold bright_blue]tunnelvault watch[/bold bright_blue]",
+        title=title,
         border_style="bright_blue",
         padding=(0, 1),
     )
 
+    return panel
+
 
 # --- Main loop ---
 
+def _resolve_names(
+    vpn_ifaces: dict[str, str],
+    exact: dict[str, str],
+    prefix: dict[str, str],
+    show_all: bool,
+) -> dict[str, str]:
+    """Map interface -> tunnel name. One profile = one interface.
+
+    Returns {interface: display_name} for interfaces to show.
+    """
+    result: dict[str, str] = {}
+    assigned_names: set[str] = set()
+
+    # 1. Exact matches (configured interface, e.g. singbox -> utun99)
+    for iface in vpn_ifaces:
+        if iface in exact:
+            result[iface] = exact[iface]
+            assigned_names.add(exact[iface])
+
+    # 2. Prefix matches: first unmatched interface wins per profile
+    remaining = sorted(set(vpn_ifaces) - set(result))
+    for iface in remaining:
+        for pfx, name in prefix.items():
+            if iface.startswith(pfx) and name not in assigned_names:
+                result[iface] = name
+                assigned_names.add(name)
+                break
+
+    # 3. --all: show remaining as raw interface names
+    if show_all:
+        for iface in vpn_ifaces:
+            if iface not in result:
+                result[iface] = iface
+
+    return result
+
+
 def run(
-    tunnel_names: Optional[dict[str, str]] = None,
+    exact_names: Optional[dict[str, str]] = None,
+    prefix_names: Optional[dict[str, str]] = None,
+    show_all: bool = False,
 ) -> None:
     """Run real-time VPN traffic monitor.
 
     Args:
-        tunnel_names: {interface: tunnel_name} mapping from config.
-                      If None, interface names are used as labels.
+        exact_names: {interface: tunnel_name} for tunnels with configured interface.
+        prefix_names: {prefix: tunnel_name} for tunnels with dynamic interface.
+        show_all: Show all VPN interfaces, not just configured ones.
     """
-    if tunnel_names is None:
-        tunnel_names = {}
+    if exact_names is None:
+        exact_names = {}
+    if prefix_names is None:
+        prefix_names = {}
+    has_config = bool(exact_names or prefix_names)
 
     get_ifaces = _darwin_vpn_ifaces if _IS_DARWIN else _linux_vpn_ifaces
     get_bytes = _darwin_iface_bytes if _IS_DARWIN else _linux_iface_bytes
@@ -348,20 +449,46 @@ def run(
     prev_bytes: dict[str, tuple[int, int]] = {}
     prev_time: Optional[float] = None
 
+    data_pool = ThreadPoolExecutor(max_workers=3, thread_name_prefix="watch")
+
+    # Suppress mouse scroll escape sequences in alternate screen
+    _old_termios = None
     try:
-        with Live(console=console, refresh_per_second=1, screen=True) as live:
+        fd = sys.stdin.fileno()
+        _old_termios = termios.tcgetattr(fd)
+        tty.setcbreak(fd)
+    except (ValueError, termios.error, OSError):
+        pass
+
+    try:
+        loading = Panel(
+            Text(f"  {t('watch.loading')}...", style="dim italic", justify="center"),
+            title=f"[bold bright_blue]tunnelvault watch[/bold bright_blue]  [dim]{t('watch.exit_hint')}[/dim]",
+            border_style="bright_blue",
+            padding=(1, 2),
+        )
+        with Live(loading, console=console, refresh_per_second=1, screen=True) as live:
             while True:
                 now = time.monotonic()
                 ts = datetime.now()
 
-                vpn_ifaces = get_ifaces()
-                all_bytes = get_bytes()
+                # Run data collection in parallel
+                t0 = time.monotonic()
+                f_ifaces = data_pool.submit(get_ifaces)
+                f_bytes = data_pool.submit(get_bytes)
+                vpn_ifaces = f_ifaces.result(timeout=5)
+                all_bytes = f_bytes.result(timeout=5)
                 vpn_ips = set(vpn_ifaces.values())
                 all_conns = get_conns(vpn_ips)
+                poll_ms = (time.monotonic() - t0) * 1000
+
+                named = _resolve_names(vpn_ifaces, exact_names, prefix_names, show_all or not has_config)
 
                 snapshots = []
                 for iface, ip in sorted(vpn_ifaces.items()):
-                    name = tunnel_names.get(iface, iface)
+                    if iface not in named:
+                        continue
+                    name = named[iface]
                     b_in, b_out = all_bytes.get(iface, (0, 0))
 
                     rate_in = rate_out = 0.0
@@ -386,7 +513,15 @@ def run(
                     ))
 
                 prev_time = now
-                live.update(_build_display(snapshots, ts))
+                live.update(_build_display(snapshots, ts, poll_ms=poll_ms))
                 time.sleep(1)
     except KeyboardInterrupt:
         pass
+    finally:
+        data_pool.shutdown(wait=False)
+        _dns_cache.shutdown()
+        if _old_termios is not None:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, _old_termios)
+            except (termios.error, OSError):
+                pass

@@ -41,6 +41,7 @@ STRINGS: dict[str, str] = {
     "main.log_tail_hint": "Tail: ./tvpn --logs <name>",
     "main.unknown_log": "Unknown log '{name}'. Available: {available}",
     "main.file_not_found": "File not found: {path}",
+    "main.needs_sudo": "This command requires root privileges (sudo)",
     "main.not_connected": "not connected",
 
     # --- config.py ---
@@ -143,6 +144,7 @@ STRINGS: dict[str, str] = {
     "validate.no_critical_errors": "No critical errors",
 
     # --- watch.py ---
+    "watch.loading": "Collecting data",
     "watch.no_active_vpn": "no active VPN",
     "watch.traffic": "Traffic",
     "watch.no_connections": "no connections",
@@ -212,4 +214,5 @@ STRINGS: dict[str, str] = {
     "cli.only": "Tunnel filter (comma-separated): --only openvpn,fortivpn",
     "cli.logs": "Log files (--logs) or tail (--logs openvpn)",
     "cli.watch": "Real-time VPN traffic monitoring",
+    "cli.all": "Show all VPN interfaces (including system)",
 }

@@ -738,6 +738,182 @@ class TestDNSProxy:
         # Resolver files NOT created (proxy didn't start)
         engine.net.setup_dns_resolver.assert_not_called()
 
+
+# =========================================================================
+# Reuse existing connections
+# =========================================================================
+
+class TestReuseExistingConnections:
+    def test_skips_connect_when_pid_alive(self, engine):
+        """Existing alive process -> skip connect, reuse PID."""
+        engine.prepare()
+
+        with patch("tv.vpn.openvpn.OpenVPNPlugin.discover_pid", return_value=12345), \
+             patch("tv.vpn.singbox.SingBoxPlugin.discover_pid", return_value=67890), \
+             patch("tv.engine.proc.is_alive", return_value=True), \
+             patch("tv.vpn.openvpn.OpenVPNPlugin.connect") as mock_ovpn, \
+             patch("tv.vpn.singbox.SingBoxPlugin.connect") as mock_sb:
+            engine.connect_all()
+
+        # connect() never called
+        mock_ovpn.assert_not_called()
+        mock_sb.assert_not_called()
+
+        # Results reflect reuse
+        assert len(engine.results) == 2
+        assert all(r.ok for r in engine.results)
+        assert engine.results[0].pid == 12345
+        assert engine.results[1].pid == 67890
+        assert "already running" in engine.results[0].detail
+        assert "already running" in engine.results[1].detail
+
+        # Plugins have PID set
+        assert engine.plugins[0]._pid == 12345
+        assert engine.plugins[1]._pid == 67890
+
+    def test_connects_when_no_existing_pid(self, engine):
+        """No existing process -> normal connect."""
+        engine.prepare()
+
+        with patch("tv.vpn.openvpn.OpenVPNPlugin.discover_pid", return_value=None), \
+             patch("tv.vpn.singbox.SingBoxPlugin.discover_pid", return_value=None), \
+             patch("tv.vpn.openvpn.OpenVPNPlugin.connect", return_value=VPNResult(ok=True)) as mock_ovpn, \
+             patch("tv.vpn.singbox.SingBoxPlugin.connect", return_value=VPNResult(ok=True)) as mock_sb:
+            engine.connect_all()
+
+        mock_ovpn.assert_called_once()
+        mock_sb.assert_called_once()
+
+    def test_connects_when_pid_dead(self, engine):
+        """Existing PID found but process dead -> normal connect."""
+        engine.prepare()
+
+        with patch("tv.vpn.openvpn.OpenVPNPlugin.discover_pid", return_value=99999), \
+             patch("tv.vpn.singbox.SingBoxPlugin.discover_pid", return_value=None), \
+             patch("tv.engine.proc.is_alive", return_value=False), \
+             patch("tv.vpn.openvpn.OpenVPNPlugin.connect", return_value=VPNResult(ok=True)) as mock_ovpn, \
+             patch("tv.vpn.singbox.SingBoxPlugin.connect", return_value=VPNResult(ok=True)) as mock_sb:
+            engine.connect_all()
+
+        mock_ovpn.assert_called_once()
+        mock_sb.assert_called_once()
+
+    def test_mixed_reuse_and_connect(self, engine):
+        """One tunnel reused, another connected fresh."""
+        engine.prepare()
+
+        def mock_discover(tcfg, script_dir):
+            if tcfg.type == "openvpn":
+                return 11111
+            return None
+
+        def mock_alive(pid):
+            return pid == 11111
+
+        with patch("tv.vpn.openvpn.OpenVPNPlugin.discover_pid", side_effect=mock_discover), \
+             patch("tv.vpn.singbox.SingBoxPlugin.discover_pid", return_value=None), \
+             patch("tv.engine.proc.is_alive", side_effect=mock_alive), \
+             patch("tv.vpn.openvpn.OpenVPNPlugin.connect") as mock_ovpn, \
+             patch("tv.vpn.singbox.SingBoxPlugin.connect", return_value=VPNResult(ok=True)) as mock_sb:
+            engine.connect_all()
+
+        mock_ovpn.assert_not_called()  # reused
+        mock_sb.assert_called_once()   # connected fresh
+
+        assert engine.results[0].ok is True
+        assert engine.results[0].pid == 11111
+        assert engine.results[1].ok is True
+
+    def test_hooks_fire_for_reused_connections(self, engine):
+        """Pre/post connect hooks fire even for reused connections."""
+        engine.prepare()
+
+        pre = MagicMock()
+        post = MagicMock()
+        engine.on("pre_connect", pre)
+        engine.on("post_connect", post)
+
+        with patch("tv.vpn.openvpn.OpenVPNPlugin.discover_pid", return_value=100), \
+             patch("tv.vpn.singbox.SingBoxPlugin.discover_pid", return_value=200), \
+             patch("tv.engine.proc.is_alive", return_value=True):
+            engine.connect_all()
+
+        assert pre.call_count == 2
+        assert post.call_count == 2
+
+    def test_reuse_shows_message(self, engine, capsys):
+        """Reused connection prints OK message."""
+        engine.prepare()
+
+        with patch("tv.vpn.openvpn.OpenVPNPlugin.discover_pid", return_value=555), \
+             patch("tv.vpn.singbox.SingBoxPlugin.discover_pid", return_value=None), \
+             patch("tv.engine.proc.is_alive", return_value=True), \
+             patch("tv.vpn.singbox.SingBoxPlugin.connect", return_value=VPNResult(ok=True)):
+            engine.connect_all()
+
+        out = capsys.readouterr().out
+        assert "already running" in out
+        assert "555" in out
+
+
+# =========================================================================
+# Quiet mode
+# =========================================================================
+
+class TestQuietMode:
+    def test_setup_quiet_no_ui_messages(self, engine, _skip_setup_io, capsys):
+        """Quiet setup produces no IPv6/routes messages."""
+        engine.tunnels = []
+        engine.setup(quiet=True)
+
+        out = capsys.readouterr().out
+        assert "IPv6" not in out
+        assert "🔌" not in out
+
+    def test_setup_loud_has_messages(self, engine, _skip_setup_io, capsys):
+        """Non-quiet setup shows info messages."""
+        engine.tunnels = []
+        engine.setup(quiet=False)
+
+        out = capsys.readouterr().out
+        assert "IPv6" in out or "🌐" in out
+
+    def test_connect_all_quiet_no_step_headers(self, engine, capsys):
+        """Quiet connect_all skips step headers."""
+        engine.prepare()
+
+        with patch("tv.vpn.openvpn.OpenVPNPlugin.discover_pid", return_value=100), \
+             patch("tv.vpn.singbox.SingBoxPlugin.discover_pid", return_value=200), \
+             patch("tv.engine.proc.is_alive", return_value=True):
+            engine.connect_all(quiet=True)
+
+        out = capsys.readouterr().out
+        assert "[1/" not in out
+
+    def test_check_all_quiet_uses_run_all_quiet(self, engine):
+        """Quiet check_all calls run_all_quiet instead of run_all_from_tunnels."""
+        engine.tunnels = [TunnelConfig(name="t", type="openvpn")]
+        engine.results = [VPNResult(ok=True)]
+
+        with patch("tv.engine.checks.run_all_quiet", return_value=([], "")) as mock_quiet, \
+             patch("tv.engine.checks.run_all_from_tunnels") as mock_loud:
+            engine.check_all(quiet=True)
+
+        mock_quiet.assert_called_once()
+        mock_loud.assert_not_called()
+
+    def test_check_all_loud_uses_run_all_from_tunnels(self, engine):
+        """Non-quiet check_all calls run_all_from_tunnels."""
+        engine.tunnels = [TunnelConfig(name="t", type="openvpn")]
+        engine.results = [VPNResult(ok=True)]
+
+        with patch("tv.engine.checks.run_all_from_tunnels", return_value=([], "")) as mock_loud, \
+             patch("tv.engine.checks.run_all_quiet") as mock_quiet:
+            engine.check_all(quiet=False)
+
+        mock_loud.assert_called_once()
+        mock_quiet.assert_not_called()
+
     def test_stop_dns_proxy_error_resilience(self, engine):
         """Errors during DNS proxy cleanup don't prevent proxy.stop()."""
         engine.tunnels = []

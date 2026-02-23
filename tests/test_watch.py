@@ -14,6 +14,7 @@ from tv.watch import (
     _fmt_total,
     _port_label,
     _build_display,
+    _resolve_names,
     _darwin_vpn_ifaces,
     _darwin_iface_bytes,
     _darwin_connections,
@@ -273,9 +274,14 @@ class TestBuildDisplay:
                 ],
             ),
         ]
-        panel = _build_display(snapshots, datetime(2025, 1, 15, 14, 32, 5))
-        # Should not raise; panel is a rich renderable
+        panel = _build_display(snapshots, datetime(2025, 1, 15, 14, 32, 5), poll_ms=42)
         assert panel is not None
+        # Title contains timing, tunnel count, and exit hint
+        title = str(panel.title)
+        assert "14:32:05" in title
+        assert "1 tunnels" in title
+        assert "42ms" in title
+        assert "Ctrl+C" in title
 
     def test_renders_empty(self):
         panel = _build_display([], datetime(2025, 1, 15, 14, 32, 5))
@@ -311,3 +317,127 @@ class TestBuildDisplay:
         ]
         panel = _build_display(snapshots, datetime(2025, 1, 15, 14, 32, 5))
         assert panel is not None
+
+
+# =========================================================================
+# _resolve_names: interface -> tunnel name matching
+# =========================================================================
+
+class TestResolveNames:
+    """Test interface-to-profile matching logic."""
+
+    def test_exact_match(self):
+        ifaces = {"utun99": "172.19.0.1"}
+        result = _resolve_names(ifaces, {"utun99": "singbox"}, {}, show_all=False)
+        assert result == {"utun99": "singbox"}
+
+    def test_prefix_match(self):
+        ifaces = {"ppp0": "10.0.0.1"}
+        result = _resolve_names(ifaces, {}, {"ppp": "fortivpn"}, show_all=False)
+        assert result == {"ppp0": "fortivpn"}
+
+    def test_one_profile_one_interface(self):
+        """Two utun interfaces but one openvpn profile - only first matches."""
+        ifaces = {"utun4": "10.8.0.22", "utun40": "198.19.254.2", "utun99": "172.19.0.1"}
+        exact = {"utun99": "singbox"}
+        prefix = {"utun": "openvpn"}
+        result = _resolve_names(ifaces, exact, prefix, show_all=False)
+        assert result == {"utun99": "singbox", "utun4": "openvpn"}
+        assert "utun40" not in result
+
+    def test_full_setup_3_profiles(self):
+        """Real scenario: fortivpn + openvpn + singbox, plus system utun40."""
+        ifaces = {
+            "ppp0": "10.212.134.103",
+            "utun4": "10.8.0.22",
+            "utun40": "198.19.254.2",
+            "utun99": "172.19.0.1",
+        }
+        exact = {"utun99": "singbox"}
+        prefix = {"ppp": "fortivpn", "utun": "openvpn"}
+        result = _resolve_names(ifaces, exact, prefix, show_all=False)
+        assert result == {
+            "ppp0": "fortivpn",
+            "utun4": "openvpn",
+            "utun99": "singbox",
+        }
+
+    def test_show_all_includes_unknown(self):
+        ifaces = {"utun4": "10.8.0.22", "utun40": "198.19.254.2"}
+        result = _resolve_names(ifaces, {}, {"utun": "openvpn"}, show_all=True)
+        assert result["utun4"] == "openvpn"
+        assert result["utun40"] == "utun40"  # raw interface name
+
+    def test_no_config_shows_all(self):
+        ifaces = {"ppp0": "10.0.0.1", "utun4": "10.8.0.22"}
+        result = _resolve_names(ifaces, {}, {}, show_all=True)
+        assert result == {"ppp0": "ppp0", "utun4": "utun4"}
+
+    def test_empty_ifaces(self):
+        result = _resolve_names({}, {"utun99": "singbox"}, {"ppp": "forti"}, show_all=False)
+        assert result == {}
+
+    def test_two_profiles_no_openvpn(self):
+        """Remove openvpn, keep fortivpn + singbox. Old openvpn utun4 should be hidden."""
+        ifaces = {
+            "ppp0": "10.212.134.103",
+            "utun4": "10.8.0.22",       # old openvpn, no profile
+            "utun40": "198.19.254.2",    # system
+            "utun99": "172.19.0.1",
+        }
+        exact = {"utun99": "singbox"}
+        prefix = {"ppp": "fortivpn"}      # no openvpn prefix
+        result = _resolve_names(ifaces, exact, prefix, show_all=False)
+        assert result == {"ppp0": "fortivpn", "utun99": "singbox"}
+        assert "utun4" not in result
+        assert "utun40" not in result
+
+    def test_two_profiles_no_fortivpn(self):
+        """Remove fortivpn, keep openvpn + singbox."""
+        ifaces = {
+            "ppp0": "10.212.134.103",    # old fortivpn, no profile
+            "utun4": "10.8.0.22",
+            "utun40": "198.19.254.2",
+            "utun99": "172.19.0.1",
+        }
+        exact = {"utun99": "singbox"}
+        prefix = {"tun": "openvpn", "utun": "openvpn"}
+        result = _resolve_names(ifaces, exact, prefix, show_all=False)
+        assert result == {"utun4": "openvpn", "utun99": "singbox"}
+        assert "ppp0" not in result
+
+    def test_two_profiles_with_state(self):
+        """State file provides exact mapping for both profiles."""
+        ifaces = {
+            "ppp0": "10.212.134.103",
+            "utun4": "10.8.0.22",
+            "utun40": "198.19.254.2",
+            "utun99": "172.19.0.1",
+        }
+        # State file resolved ppp0 and utun99 to names, no openvpn
+        exact = {"ppp0": "fortivpn", "utun99": "singbox"}
+        result = _resolve_names(ifaces, exact, {}, show_all=False)
+        assert result == {"ppp0": "fortivpn", "utun99": "singbox"}
+
+    def test_two_openvpn_with_state(self):
+        """Two openvpn profiles - state file distinguishes them."""
+        ifaces = {"utun4": "10.8.0.22", "utun5": "10.9.0.22"}
+        exact = {"utun4": "openvpn-work", "utun5": "openvpn-personal"}
+        result = _resolve_names(ifaces, exact, {}, show_all=False)
+        assert result == {"utun4": "openvpn-work", "utun5": "openvpn-personal"}
+
+    def test_two_profiles_show_all(self):
+        """With --all, unknown interfaces show with raw names."""
+        ifaces = {
+            "ppp0": "10.212.134.103",
+            "utun4": "10.8.0.22",
+            "utun40": "198.19.254.2",
+            "utun99": "172.19.0.1",
+        }
+        exact = {"utun99": "singbox"}
+        prefix = {"ppp": "fortivpn"}
+        result = _resolve_names(ifaces, exact, prefix, show_all=True)
+        assert result["ppp0"] == "fortivpn"
+        assert result["utun99"] == "singbox"
+        assert result["utun4"] == "utun4"
+        assert result["utun40"] == "utun40"

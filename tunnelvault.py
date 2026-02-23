@@ -40,11 +40,7 @@ def main() -> None:
         ui.fail(t("main.one_command"))
         sys.exit(1)
 
-    # --- Commands without defaults.toml ---
-
-    if args.reset:
-        disconnect.run(defs={}, script_dir=script_dir)
-        return
+    # --- Read-only commands (no sudo required) ---
 
     if args.status:
         from tv import status
@@ -52,9 +48,19 @@ def main() -> None:
         return
 
     if args.watch:
-        tunnel_names = _try_load_tunnel_names(script_dir, args.only)
+        exact_names, prefix_names = _try_load_tunnel_names(script_dir, args.only)
         from tv import watch
-        watch.run(tunnel_names=tunnel_names)
+        show_all = getattr(args, 'all', False)
+        watch.run(exact_names=exact_names, prefix_names=prefix_names, show_all=show_all)
+        return
+
+    # --- Commands that need root ---
+
+    if os.geteuid() != 0:
+        ui.warn(t("main.needs_sudo"))
+
+    if args.reset:
+        disconnect.run(defs={}, script_dir=script_dir)
         return
 
     # --- Commands that need defaults.toml ---
@@ -137,7 +143,11 @@ def main() -> None:
     signal.signal(signal.SIGTERM, on_signal)
 
     # --- Start ---
-    ui.logo()
+    settings_path = script_dir / cfg.paths.settings_file
+    quiet = not args.setup and settings_path.exists()
+
+    if not quiet:
+        ui.logo()
 
     engine.log.log("INFO", "=" * 40)
     engine.log.log("INFO", f"tunnelvault started (PID={os.getpid()})")
@@ -154,18 +164,39 @@ def main() -> None:
         ui.fail(str(e))
         sys.exit(1)
 
-    engine.setup(clear=args.clear)
-    engine.connect_all()
-    check_results, ext_ip = engine.check_all()
+    engine.setup(clear=args.clear, quiet=quiet)
+    engine.connect_all(quiet=quiet)
+    check_results, ext_ip = engine.check_all(quiet=quiet)
 
     # --- Summary ---
-    _log_summary(engine, check_results, ext_ip)
+    if not quiet:
+        _log_summary(engine, check_results, ext_ip)
+    else:
+        # Minimal logging only
+        engine.log.log("INFO", "=== Summary ===")
+        for tcfg, r in zip(engine.tunnels, engine.results):
+            engine.log.log("INFO", f"{tcfg.name}: ok={r.ok}")
+        engine.log.log("INFO", f"Log: {engine.log.log_path}")
+
+
+# VPN type -> interface prefixes for dynamic matching
+_TYPE_PREFIXES: dict[str, list[str]] = {
+    "fortivpn": ["ppp"],
+    "openvpn": ["tun", "utun"],
+    "singbox": ["utun"],
+}
 
 
 def _try_load_tunnel_names(
     script_dir: Path, only: str | None = None,
-) -> dict[str, str]:
-    """Best-effort: map interface -> tunnel name from defaults.toml."""
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Best-effort: load tunnel name mappings from defaults.toml + watch state.
+
+    Returns:
+        (exact_map, prefix_map):
+        - exact_map: {interface: name} for tunnels with known interface
+        - prefix_map: {prefix: name} for tunnels with dynamic interface (fallback)
+    """
     try:
         try:
             import tomllib
@@ -174,7 +205,7 @@ def _try_load_tunnel_names(
 
         path = script_dir / cfg.paths.defaults_file
         if not path.exists():
-            return {}
+            return {}, {}
 
         with open(path, "rb") as f:
             data = tomllib.load(f)
@@ -186,9 +217,21 @@ def _try_load_tunnel_names(
         if only:
             tunnels = defaults_mod.filter_tunnels(tunnels, only)
 
-        return {t_.interface: t_.name for t_ in tunnels if t_.interface}
+        # Priority 1: saved state from last connect (exact PID-verified interface)
+        from tv.engine import load_watch_state
+        exact: dict[str, str] = load_watch_state(script_dir)
+
+        # Priority 2: configured interface from defaults.toml
+        prefix: dict[str, str] = {}
+        for t_ in tunnels:
+            if t_.interface and t_.interface not in exact:
+                exact[t_.interface] = t_.name
+            elif not t_.interface and t_.name not in exact.values():
+                for pfx in _TYPE_PREFIXES.get(t_.type, []):
+                    prefix[pfx] = t_.name
+        return exact, prefix
     except Exception:
-        return {}
+        return {}, {}
 
 
 def _run_check_only(tunnels: list[TunnelConfig], script_dir: Path) -> None:

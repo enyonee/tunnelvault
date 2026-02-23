@@ -356,3 +356,151 @@ def run_all_from_tunnels(
         logger.log("INFO", f"Checks: passed={passed} failed={failed} skipped={skipped} total={len(results)}")
 
     return results, ext_ip
+
+
+# --- Quiet mode (single animated line) ---
+
+def _collect_check_tasks(
+    tunnel_checks: list[tuple[str, bool, dict]],
+) -> list[tuple[str, bool, str, Callable[[], bool | str | None]]]:
+    """Collect all checks as (label, guard, type, fn) without running them."""
+    tasks: list[tuple[str, bool, str, Callable[[], bool | str | None]]] = []
+
+    for tunnel_name, is_ok, checks_cfg in tunnel_checks:
+        if not checks_cfg:
+            continue
+
+        for entry in checks_cfg.get("ports", []):
+            host = entry.get("host", "")
+            port = entry.get("port", 0)
+            if host and port:
+                tasks.append((
+                    f"{host}:{port}",
+                    is_ok, "port",
+                    lambda h=host, p=port: _check_port(h, p),
+                ))
+
+        for entry in checks_cfg.get("ping", []):
+            host = entry.get("host", "")
+            if not host:
+                continue
+            label = entry.get("label", host)
+            fallback = entry.get("fallback", "")
+            fb = _parse_fallback(fallback, host)
+
+            def _ping_with_fb(h=host, f=fb):
+                try:
+                    if _check_ping(h):
+                        return True
+                except Exception:
+                    pass
+                if f:
+                    fb_fn, _ = f
+                    try:
+                        return fb_fn()
+                    except Exception:
+                        pass
+                return False
+
+            tasks.append((f"{host} ({label})", is_ok, "ping", _ping_with_fb))
+
+        for entry in checks_cfg.get("dns", []):
+            name = entry.get("name", "")
+            server = entry.get("server", "")
+            if name and server:
+                tasks.append((
+                    f"{name} @{server}",
+                    is_ok, "dns",
+                    lambda n=name, s=server: _check_dns(n, s),
+                ))
+
+        for url in checks_cfg.get("http", []):
+            label = url.replace("https://", "").replace("http://", "").rstrip("/")
+            tasks.append((label, is_ok, "http", lambda u=url: _check_http_any(u)))
+
+        ext_ip_url = checks_cfg.get("external_ip_url", "")
+        if ext_ip_url:
+            tasks.append((
+                "external-ip", is_ok, "ext_ip",
+                lambda u=ext_ip_url: get_external_ip(u),
+            ))
+
+    return tasks
+
+
+def run_all_quiet(
+    tunnel_checks: list[tuple[str, bool, dict]],
+    logger: Optional[Logger] = None,
+) -> tuple[list[CheckResult], str]:
+    """Run checks with single-line animated output."""
+    import shutil
+    import sys
+
+    tasks = _collect_check_tasks(tunnel_checks)
+    if not tasks:
+        return [], ""
+
+    results: list[CheckResult] = []
+    ext_ip = ""
+    total = len(tasks)
+    cols = shutil.get_terminal_size().columns
+
+    for i, (label, guard, ctype, fn) in enumerate(tasks, 1):
+        # Animated progress line
+        line = f"  \033[0;36m⟳\033[0m {i}/{total} {label}"
+        # Truncate and pad to terminal width
+        vis_len = len(line) - 8  # subtract ANSI codes length
+        pad = max(0, cols - vis_len)
+        sys.stderr.write(f"\r{line}{' ' * pad}")
+        sys.stderr.flush()
+
+        if not guard:
+            results.append(CheckResult(label, "skip", t("check.skip")))
+            if logger:
+                logger.log("CHECK", f"[{i}] {label} -> SKIP")
+            continue
+
+        try:
+            result = fn()
+        except Exception:
+            result = False
+
+        if ctype == "ext_ip":
+            if result:
+                ext_ip = str(result)
+                results.append(CheckResult(label, "ok", ext_ip))
+                if logger:
+                    logger.log("CHECK", f"[{i}] {label} -> OK ({ext_ip})")
+            else:
+                results.append(CheckResult(label, "fail", t("check.timeout")))
+                if logger:
+                    logger.log("CHECK", f"[{i}] {label} -> FAIL")
+        elif result:
+            results.append(CheckResult(label, "ok", "ok"))
+            if logger:
+                logger.log("CHECK", f"[{i}] {label} -> OK")
+        else:
+            results.append(CheckResult(label, "fail", "fail"))
+            if logger:
+                logger.log("CHECK", f"[{i}] {label} -> FAIL")
+
+    # Final summary line
+    passed = sum(1 for r in results if r.status == "ok")
+    failed = sum(1 for r in results if r.status == "fail")
+
+    if failed == 0:
+        summary = f"  \033[0;32m✅ {passed}/{total} checks passed\033[0m"
+    else:
+        summary = f"  \033[0;31m❌ {failed} failed\033[0m, \033[0;32m{passed} passed\033[0m / {total}"
+
+    if ext_ip:
+        summary += f"  \033[2mIP: {ext_ip}\033[0m"
+
+    pad = max(0, cols - len(summary) + 16)  # account for ANSI
+    sys.stderr.write(f"\r{summary}{' ' * pad}\n")
+    sys.stderr.flush()
+
+    if logger:
+        logger.log("INFO", f"Checks: passed={passed} failed={failed} total={total}")
+
+    return results, ext_ip

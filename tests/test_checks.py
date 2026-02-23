@@ -155,3 +155,122 @@ class TestRunOneInverse:
         """Исключение в check-функции = fail, не crash."""
         r = _run_one(1, True, "test", lambda: 1/0, "ok", "error", None)
         assert r.status == "fail"
+
+
+# =========================================================================
+# Quiet mode: _collect_check_tasks & run_all_quiet
+# =========================================================================
+
+from tv.checks import _collect_check_tasks, run_all_quiet
+
+
+class TestCollectCheckTasks:
+    def test_empty_input(self):
+        assert _collect_check_tasks([]) == []
+
+    def test_empty_checks(self):
+        assert _collect_check_tasks([("tun", True, {})]) == []
+
+    def test_collects_ports(self):
+        checks = {"ports": [{"host": "10.0.0.1", "port": 22}]}
+        tasks = _collect_check_tasks([("tun", True, checks)])
+        assert len(tasks) == 1
+        assert tasks[0][0] == "10.0.0.1:22"
+        assert tasks[0][1] is True  # guard
+
+    def test_collects_ping(self):
+        checks = {"ping": [{"host": "10.0.0.1", "label": "DNS"}]}
+        tasks = _collect_check_tasks([("tun", True, checks)])
+        assert len(tasks) == 1
+        assert "10.0.0.1" in tasks[0][0]
+        assert "DNS" in tasks[0][0]
+
+    def test_collects_dns(self):
+        checks = {"dns": [{"name": "app.local", "server": "10.0.1.1"}]}
+        tasks = _collect_check_tasks([("tun", True, checks)])
+        assert len(tasks) == 1
+        assert "app.local" in tasks[0][0]
+        assert "@10.0.1.1" in tasks[0][0]
+
+    def test_collects_http(self):
+        checks = {"http": ["https://google.com"]}
+        tasks = _collect_check_tasks([("tun", True, checks)])
+        assert len(tasks) == 1
+        assert "google.com" in tasks[0][0]
+
+    def test_collects_external_ip(self):
+        checks = {"external_ip_url": "https://ifconfig.me"}
+        tasks = _collect_check_tasks([("tun", True, checks)])
+        assert len(tasks) == 1
+        assert tasks[0][2] == "ext_ip"
+
+    def test_skips_invalid_entries(self):
+        checks = {
+            "ports": [{"host": "", "port": 0}, {"host": "ok", "port": 80}],
+            "ping": [{"host": ""}],
+            "dns": [{"name": "", "server": ""}],
+        }
+        tasks = _collect_check_tasks([("tun", True, checks)])
+        assert len(tasks) == 1  # only valid port entry
+
+    def test_guard_propagated(self):
+        checks = {"ports": [{"host": "h", "port": 80}]}
+        tasks = _collect_check_tasks([("tun", False, checks)])
+        assert tasks[0][1] is False
+
+    def test_multiple_tunnels(self):
+        c1 = {"ports": [{"host": "a", "port": 1}]}
+        c2 = {"ports": [{"host": "b", "port": 2}]}
+        tasks = _collect_check_tasks([("t1", True, c1), ("t2", False, c2)])
+        assert len(tasks) == 2
+        assert tasks[0][0] == "a:1"
+        assert tasks[1][0] == "b:2"
+
+
+class TestRunAllQuiet:
+    def test_empty_checks(self):
+        results, ext_ip = run_all_quiet([])
+        assert results == []
+        assert ext_ip == ""
+
+    @patch("subprocess.run")
+    def test_all_pass(self, mock_run, capsys):
+        mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
+        checks = {"ports": [{"host": "h", "port": 80}]}
+        results, _ = run_all_quiet([("tun", True, checks)])
+        assert len(results) == 1
+        assert results[0].status == "ok"
+        err = capsys.readouterr().err
+        assert "1/1" in err
+        assert "passed" in err
+
+    @patch("subprocess.run")
+    def test_fail_shows_failed_count(self, mock_run, capsys):
+        mock_run.return_value = subprocess.CompletedProcess([], 1, "", "")
+        checks = {"ports": [{"host": "h", "port": 80}]}
+        results, _ = run_all_quiet([("tun", True, checks)])
+        assert results[0].status == "fail"
+        err = capsys.readouterr().err
+        assert "failed" in err
+
+    def test_skip_when_guard_false(self, capsys):
+        checks = {"ports": [{"host": "h", "port": 80}]}
+        results, _ = run_all_quiet([("tun", False, checks)])
+        assert results[0].status == "skip"
+
+    @patch("subprocess.run")
+    def test_external_ip_captured(self, mock_run, capsys):
+        mock_run.return_value = subprocess.CompletedProcess([], 0, "1.2.3.4", "")
+        checks = {"external_ip_url": "https://ifconfig.me"}
+        results, ext_ip = run_all_quiet([("tun", True, checks)])
+        assert ext_ip == "1.2.3.4"
+        assert results[0].status == "ok"
+        err = capsys.readouterr().err
+        assert "1.2.3.4" in err
+
+    def test_logger_receives_entries(self):
+        log = MagicMock()
+        checks = {"ports": [{"host": "h", "port": 80}]}
+        with patch("subprocess.run", return_value=subprocess.CompletedProcess([], 0, "", "")):
+            run_all_quiet([("tun", True, checks)], logger=log)
+        log.log.assert_called()

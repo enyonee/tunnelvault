@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -17,6 +18,27 @@ from tv.logger import Logger
 from tv.net import NetManager, create as create_net
 from tv.vpn.base import TunnelConfig, TunnelPlugin, VPNResult
 from tv.vpn.registry import get_plugin
+
+
+def load_watch_state(script_dir: Path) -> dict[str, str]:
+    """Read saved interface->name mapping from watch-state.json.
+
+    Returns {interface: tunnel_name} for currently alive processes.
+    """
+    try:
+        path = config.resolve_log_dir(script_dir) / "watch-state.json"
+        if not path.exists():
+            return {}
+        state = json.loads(path.read_text())
+        result = {}
+        for name, info in state.items():
+            iface = info.get("interface", "")
+            pid = info.get("pid")
+            if iface and pid and proc.is_alive(pid):
+                result[iface] = name
+        return result
+    except (OSError, json.JSONDecodeError, TypeError):
+        return {}
 
 
 class Engine:
@@ -105,15 +127,17 @@ class Engine:
             config.save_tunnel_settings(self.tunnels, self.script_dir)
             print()
 
-    def setup(self, *, clear: bool = False) -> None:
+    def setup(self, *, clear: bool = False, quiet: bool = False) -> None:
         """Pre-connection setup: optional cleanup, IPv6, VPN server routes, clean logs."""
         if clear:
-            ui.info(f"🧹 {t('engine.clearing')}")
+            if not quiet:
+                ui.info(f"🧹 {t('engine.clearing')}")
             self.log.log("INFO", "--- Clearing previous connections ---")
             disconnect.run(self.net, self.log, self.defs, script_dir=self.script_dir)
             time.sleep(cfg.timeouts.cleanup_sleep)
 
-        ui.info(f"🌐 {t('engine.disable_ipv6')}")
+        if not quiet:
+            ui.info(f"🌐 {t('engine.disable_ipv6')}")
         self.log.log("INFO", "--- Disabling IPv6 ---")
         ipv6_ok = self.net.disable_ipv6()
         self.log.log(
@@ -122,16 +146,16 @@ class Engine:
         )
 
         gw = self.net.default_gateway()
-        self._setup_vpn_server_routes(gw)
-        self._setup_bypass_routes(gw)
-        self._start_dns_proxy(gw)
+        self._setup_vpn_server_routes(gw, quiet=quiet)
+        self._setup_bypass_routes(gw, quiet=quiet)
+        self._start_dns_proxy(gw, quiet=quiet)
 
         # Pre-create log files with correct ownership (readable without sudo)
         config.prepare_log_files(self.tunnels)
         self.log.log("INFO", "VPN logs prepared")
 
-    def connect_all(self) -> None:
-        """Connect all tunnels sequentially."""
+    def connect_all(self, *, quiet: bool = False) -> None:
+        """Connect all tunnels sequentially. Reuses existing connections."""
         self.plugins = []
         self.results = []
         total = len(self.tunnels)
@@ -142,21 +166,64 @@ class Engine:
 
             self._fire("pre_connect", tunnel=tcfg, plugin=plugin, index=i, total=total)
 
-            ui.step(i, total, plugin.display_name, tcfg.name)
+            if not quiet:
+                ui.step(i, total, plugin.display_name, tcfg.name)
             self.log.log("INFO", f"=== [{i}/{total}] {plugin.display_name} ({tcfg.name}) ===")
 
-            result = plugin.connect()
+            # Check if already running
+            existing_pid = plugin_cls.discover_pid(tcfg, self.script_dir)
+            if existing_pid and proc.is_alive(existing_pid):
+                plugin._pid = existing_pid
+                detail = f"already running (PID={existing_pid})"
+                ui.ok(f"{plugin.display_name} {detail}")
+                self.log.log("INFO", f"{plugin.display_name} {detail}, skipping connect")
+                result = VPNResult(ok=True, pid=existing_pid, detail=detail)
+            else:
+                result = plugin.connect()
+
             self.results.append(result)
 
             self._fire("post_connect", tunnel=tcfg, plugin=plugin, result=result, index=i, total=total)
 
-    def check_all(self) -> tuple[list[checks.CheckResult], str]:
+        self._save_watch_state()
+
+    def _save_watch_state(self) -> None:
+        """Persist interface->name mapping for --watch.
+
+        Merges with existing state so --only runs don't erase other tunnels.
+        Dead PIDs are cleaned up on read (load_watch_state).
+        """
+        path = config.resolve_log_dir(self.script_dir) / "watch-state.json"
+        try:
+            existing = json.loads(path.read_text()) if path.exists() else {}
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+
+        for tcfg, result in zip(self.tunnels, self.results):
+            if result.ok and tcfg.interface:
+                existing[tcfg.name] = {
+                    "interface": tcfg.interface,
+                    "pid": result.pid,
+                    "type": tcfg.type,
+                }
+            elif not result.ok and tcfg.name in existing:
+                del existing[tcfg.name]
+
+        try:
+            path.write_text(json.dumps(existing))
+        except OSError:
+            pass
+
+    def check_all(self, *, quiet: bool = False) -> tuple[list[checks.CheckResult], str]:
         """Run health checks for all connected tunnels."""
         check_input = [
             (tcfg.name, r.ok, tcfg.checks)
             for tcfg, r in zip(self.tunnels, self.results)
         ]
-        results, ext_ip = checks.run_all_from_tunnels(check_input, logger=self.log)
+        if quiet:
+            results, ext_ip = checks.run_all_quiet(check_input, logger=self.log)
+        else:
+            results, ext_ip = checks.run_all_from_tunnels(check_input, logger=self.log)
 
         failed = [r for r in results if r.status == "fail"]
         if failed:
@@ -185,8 +252,25 @@ class Engine:
 
         self._stop_dns_proxy()
         self.net.restore_ipv6()
+        self._clean_watch_state()
 
-    def _setup_vpn_server_routes(self, gw: str | None) -> None:
+    def _clean_watch_state(self) -> None:
+        """Remove disconnected tunnels from watch state."""
+        path = config.resolve_log_dir(self.script_dir) / "watch-state.json"
+        try:
+            if not path.exists():
+                return
+            state = json.loads(path.read_text())
+            for tcfg in self.tunnels:
+                state.pop(tcfg.name, None)
+            if state:
+                path.write_text(json.dumps(state))
+            else:
+                path.unlink(missing_ok=True)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    def _setup_vpn_server_routes(self, gw: str | None, *, quiet: bool = False) -> None:
         """Add host routes to VPN servers through the default gateway."""
         routes_cfg = get_vpn_server_routes(self.defs)
 
@@ -199,7 +283,8 @@ class Engine:
             return
 
         self.log.log("INFO", f"--- Host routes via GW={gw} ---")
-        ui.info(f"🔌 {t('engine.host_routes', gw=gw)}")
+        if not quiet:
+            ui.info(f"🔌 {t('engine.host_routes', gw=gw)}")
 
         for hostname in resolve_hosts:
             for ip in self.net.resolve_host(hostname):
@@ -216,7 +301,7 @@ class Engine:
                 f"route add {static_ip} {'OK' if ok else 'FAIL'}",
             )
 
-    def _setup_bypass_routes(self, gw: str | None) -> None:
+    def _setup_bypass_routes(self, gw: str | None, *, quiet: bool = False) -> None:
         """Add bypass routes for domains/hosts/networks that should skip VPN."""
         bypass_cfg = get_bypass_routes(self.defs)
         hosts = bypass_cfg.get("hosts", [])
@@ -231,7 +316,8 @@ class Engine:
             return
 
         self.log.log("INFO", f"--- Bypass routes via GW={gw} ---")
-        ui.info(f"🔀 {t('engine.bypass_routes', gw=gw)}")
+        if not quiet:
+            ui.info(f"🔀 {t('engine.bypass_routes', gw=gw)}")
 
         for hostname in domains:
             for ip in self.net.resolve_host(hostname):
@@ -255,7 +341,7 @@ class Engine:
                 f"bypass net {network} -> {gw} {'OK' if ok else 'FAIL'}",
             )
 
-    def _start_dns_proxy(self, gw: str | None) -> None:
+    def _start_dns_proxy(self, gw: str | None, *, quiet: bool = False) -> None:
         """Start DNS bypass proxy if domain_suffix is configured."""
         if self._dns_proxy is not None:
             self._stop_dns_proxy()
@@ -308,7 +394,8 @@ class Engine:
                 f"resolver {zone} -> 127.0.0.1 {'OK' if result.get(zone) else 'FAIL'}",
             )
 
-        ui.info(f"🔀 {t('engine.dns_bypass_proxy', suffixes=', '.join(suffixes))}")
+        if not quiet:
+            ui.info(f"🔀 {t('engine.dns_bypass_proxy', suffixes=', '.join(suffixes))}")
 
     def _stop_dns_proxy(self) -> None:
         """Stop DNS bypass proxy and clean up resolver files and routes."""

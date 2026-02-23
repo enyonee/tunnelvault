@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--only", type=str, default=None, help=t("cli.only"))
     p.add_argument("--logs", nargs="?", const="", default=None, help=t("cli.logs"))
     p.add_argument("--watch", action="store_true", help=t("cli.watch"))
+    p.add_argument("--all", action="store_true", help=t("cli.all"))
     return p.parse_args()
 
 
