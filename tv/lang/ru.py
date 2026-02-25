@@ -43,6 +43,13 @@ STRINGS: dict[str, str] = {
     "main.file_not_found": "Файл не найден: {path}",
     "main.needs_sudo": "Эта команда требует прав root (sudo)",
     "main.not_connected": "не подключен",
+    "main.skipped_binary": "Профиль '{name}' пропущен - '{binary}' не установлен",
+    "main.keepalive_started": "Keepalive: мониторинг каждые {interval}с (авто-реконнект при sleep/wake)",
+    "main.keepalive_reconnecting": "Переподключение ({reason})...",
+    "main.keepalive_reason_wake": "выход из сна",
+    "main.keepalive_reason_dead": "процесс умер",
+    "main.keepalive_reconnected": "Переподключено {ok}/{total}: {names}",
+    "main.keepalive_failed": "Переподключение не удалось: {error}",
 
     # --- config.py ---
     "config.settings_loaded": "Настройки: загружены",
@@ -98,6 +105,8 @@ STRINGS: dict[str, str] = {
     "engine.profiles": "Профили: {names}",
     "engine.params_section": "Параметры: {name}",
     "engine.settings_incomplete": "Настройки неполные, запускаю wizard...",
+    "engine.binary_not_found": "'{binary}' не найден, пропускаю профиль '{name}' (установите пакет для использования)",
+    "engine.no_available_tunnels": "Нет доступных туннелей - все необходимые VPN-пакеты отсутствуют",
 
     # --- disconnect.py ---
     "disc.deleting_routes": "Удаляю маршруты...",
@@ -135,6 +144,7 @@ STRINGS: dict[str, str] = {
     "validate.dns_no_ns": "dns.domains без dns.nameservers",
     "validate.param_needs_env": "auth.{key} ({label}) не задан - потребуется ENV/wizard",
     "validate.config_will_default": "config_file ({label}) не задан - будет использован default",
+    "validate.binary_not_found": "'{binary}' не установлен - этот туннель будет пропущен",
     "validate.missing_check_host": "checks.ports: отсутствует 'host'",
     "validate.missing_check_port": "checks.ports: отсутствует 'port'",
     "validate.suffix_no_dot": "'{suffix}' не начинается с точки",
@@ -188,6 +198,18 @@ STRINGS: dict[str, str] = {
     "param.cert_sha256": "SHA256 сертификата",
     "param.fallback_gw": "Fallback GW",
 
+    # --- daemon.py ---
+    "daemon.installed": "Демон установлен и загружен",
+    "daemon.install_failed": "Не удалось установить демон: {error}",
+    "daemon.uninstalled": "Демон выгружен и удалён",
+    "daemon.not_installed": "Демон не установлен",
+    "daemon.label": "Сервис",
+    "daemon.status_label": "Статус",
+    "daemon.plist_label": "Plist",
+    "daemon.running": "запущен",
+    "daemon.stopped": "остановлен",
+    "daemon.log_hint": "Лог: tail -f {path}",
+
     # --- routing.py ---
     "routing.wildcard_no_dot": "*.{domain} - домен должен содержать точку (*.example.local)",
     "routing.invalid_cidr": "{target} - невалидный CIDR",
@@ -215,4 +237,6 @@ STRINGS: dict[str, str] = {
     "cli.logs": "Лог-файлы (--logs) или tail (--logs openvpn)",
     "cli.watch": "Мониторинг VPN-трафика в реальном времени",
     "cli.all": "Показать все VPN-интерфейсы (включая системные)",
+    "cli.keepalive": "Оставаться запущенным и авто-реконнект при sleep/wake",
+    "cli.daemon": "Демон: install/uninstall/status (launchd keepalive сервис)",
 }

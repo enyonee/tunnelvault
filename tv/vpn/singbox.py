@@ -16,6 +16,7 @@ from tv.vpn.registry import register
 class SingBoxPlugin(TunnelPlugin):
     """sing-box tunnel plugin."""
 
+    binary = "sing-box"
     type_display_name = "sing-box"
     process_names = ["sing-box"]
 

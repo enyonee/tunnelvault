@@ -64,6 +64,7 @@ class Engine:
         self.tunnels: list[TunnelConfig] = []
         self.plugins: list[TunnelPlugin] = []
         self.results: list[VPNResult] = []
+        self.skipped_binaries: dict[str, str] = {}  # {tunnel_name: binary}
         self._hooks: dict[str, list[Callable]] = defaultdict(list)
         self._dns_proxy: Optional[BypassDNSProxy] = None
         self._dns_proxy_zones: list[str] = []
@@ -78,6 +79,25 @@ class Engine:
         for fn in self._hooks.get(event, []):
             fn(**ctx)
 
+    # --- Binary checks ---
+
+    def _filter_available(self, tunnels: list[TunnelConfig]) -> list[TunnelConfig]:
+        """Remove tunnels whose VPN binary is not installed."""
+        available = []
+        for tcfg in tunnels:
+            plugin_cls = get_plugin(tcfg.type)
+            if plugin_cls.check_binary():
+                available.append(tcfg)
+            else:
+                binary = plugin_cls.binary or tcfg.type
+                ui.warn(t("engine.binary_not_found", name=tcfg.name, binary=binary))
+                self.log.log(
+                    "WARN",
+                    f"Binary '{binary}' not found, skipping tunnel '{tcfg.name}'",
+                )
+                self.skipped_binaries[tcfg.name] = binary
+        return available
+
     # --- Lifecycle ---
 
     def prepare(self, *, setup: bool = False, _retry: bool = False) -> None:
@@ -86,6 +106,14 @@ class Engine:
         self.plugins = []
         self.results = []
         self.tunnels = defaults_mod.parse_tunnels(self.defs)
+
+        # Filter out tunnels whose binary is not installed
+        self.tunnels = self._filter_available(self.tunnels)
+        if not self.tunnels:
+            ui.warn(t("engine.no_available_tunnels"))
+            self.log.log("WARN", "No tunnels available (all binaries missing)")
+            return
+
         config.resolve_log_paths(self.tunnels, self.script_dir)
 
         settings_path = self.script_dir / cfg.paths.settings_file
@@ -104,7 +132,11 @@ class Engine:
                     print()
                 try:
                     config.resolve_tunnel_params(
-                        tcfg, plugin_cls, saved, self.script_dir, quiet=quiet,
+                        tcfg,
+                        plugin_cls,
+                        saved,
+                        self.script_dir,
+                        quiet=quiet,
                     )
                 except config.SetupRequiredError:
                     if not quiet or _retry:
@@ -168,7 +200,9 @@ class Engine:
 
             if not quiet:
                 ui.step(i, total, plugin.display_name, tcfg.name)
-            self.log.log("INFO", f"=== [{i}/{total}] {plugin.display_name} ({tcfg.name}) ===")
+            self.log.log(
+                "INFO", f"=== [{i}/{total}] {plugin.display_name} ({tcfg.name}) ==="
+            )
 
             # Check if already running
             existing_pid = plugin_cls.discover_pid(tcfg, self.script_dir)
@@ -176,14 +210,23 @@ class Engine:
                 plugin._pid = existing_pid
                 detail = f"already running (PID={existing_pid})"
                 ui.ok(f"{plugin.display_name} {detail}")
-                self.log.log("INFO", f"{plugin.display_name} {detail}, skipping connect")
+                self.log.log(
+                    "INFO", f"{plugin.display_name} {detail}, skipping connect"
+                )
                 result = VPNResult(ok=True, pid=existing_pid, detail=detail)
             else:
                 result = plugin.connect()
 
             self.results.append(result)
 
-            self._fire("post_connect", tunnel=tcfg, plugin=plugin, result=result, index=i, total=total)
+            self._fire(
+                "post_connect",
+                tunnel=tcfg,
+                plugin=plugin,
+                result=result,
+                index=i,
+                total=total,
+            )
 
         self._save_watch_state()
 
@@ -213,6 +256,24 @@ class Engine:
             path.write_text(json.dumps(existing))
         except OSError:
             pass
+
+    def check_alive(self) -> list[tuple[TunnelConfig, int | None]]:
+        """Return list of (tunnel_config, dead_pid) for tunnels with dead processes."""
+        dead: list[tuple[TunnelConfig, int | None]] = []
+        for plugin, tcfg, result in zip(self.plugins, self.tunnels, self.results):
+            if result.ok and plugin._pid and not proc.is_alive(plugin._pid):
+                dead.append((tcfg, plugin._pid))
+        return dead
+
+    def reconnect_all(
+        self, *, quiet: bool = True
+    ) -> tuple[list[checks.CheckResult], str]:
+        """Full reconnect cycle: disconnect, setup, connect, check."""
+        self.disconnect_all()
+        time.sleep(cfg.timeouts.keepalive_reconnect_pause)
+        self.setup(clear=False, quiet=quiet)
+        self.connect_all(quiet=quiet)
+        return self.check_all(quiet=quiet)
 
     def check_all(self, *, quiet: bool = False) -> tuple[list[checks.CheckResult], str]:
         """Run health checks for all connected tunnels."""
@@ -387,7 +448,8 @@ class Engine:
         # Create /etc/resolver/{zone} files pointing to 127.0.0.1
         for zone in zones:
             result = self.net.setup_dns_resolver(
-                domains=[zone], nameservers=["127.0.0.1"],
+                domains=[zone],
+                nameservers=["127.0.0.1"],
             )
             self.log.log(
                 "INFO" if result.get(zone) else "WARN",

@@ -46,6 +46,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--logs", nargs="?", const="", default=None, help=t("cli.logs"))
     p.add_argument("--watch", action="store_true", help=t("cli.watch"))
     p.add_argument("--all", action="store_true", help=t("cli.all"))
+    p.add_argument("--keepalive", action="store_true", help=t("cli.keepalive"))
+    p.add_argument(
+        "--daemon",
+        choices=["install", "uninstall", "status"],
+        default=None,
+        help=t("cli.daemon"),
+    )
     return p.parse_args()
 
 
@@ -58,11 +65,15 @@ def load_settings(script_dir: Path, *, quiet: bool = False) -> dict:
         try:
             data = json.loads(path.read_text())
             if not quiet:
-                print(f"  {ui.GREEN}📂{ui.NC} {t('config.settings_loaded')} {ui.DIM}({cfg.paths.settings_file}){ui.NC}")
+                print(
+                    f"  {ui.GREEN}📂{ui.NC} {t('config.settings_loaded')} {ui.DIM}({cfg.paths.settings_file}){ui.NC}"
+                )
             return data
         except (json.JSONDecodeError, OSError) as e:
             if not quiet:
-                print(f"  {ui.RED}⚠{ui.NC}  {t('config.settings_error')} {ui.DIM}({e}){ui.NC}")
+                print(
+                    f"  {ui.RED}⚠{ui.NC}  {t('config.settings_error')} {ui.DIM}({e}){ui.NC}"
+                )
             # Fall through to try bash settings migration
 
     # Try migrating from old bash format
@@ -75,7 +86,9 @@ def load_settings(script_dir: Path, *, quiet: bool = False) -> dict:
             return migrated
 
     if not quiet:
-        print(f"  {ui.YELLOW}📂{ui.NC} {t('config.settings_not_found')} {ui.DIM}{t('config.settings_will_create', file=cfg.paths.settings_file)}{ui.NC}")
+        print(
+            f"  {ui.YELLOW}📂{ui.NC} {t('config.settings_not_found')} {ui.DIM}{t('config.settings_will_create', file=cfg.paths.settings_file)}{ui.NC}"
+        )
     return {}
 
 
@@ -170,24 +183,36 @@ def resolve_tunnel_params(
                 if env_val:
                     _set_param_value(tcfg, param, env_val)
                     if not quiet:
-                        ui.param_found(param.label, env_val, f"${param.env_var}", param.secret)
+                        ui.param_found(
+                            param.label, env_val, f"${param.env_var}", param.secret
+                        )
                     continue
                 saved_val = tunnel_saved.get(param.key, "")
                 if saved_val:
                     _set_param_value(tcfg, param, saved_val)
                     if not quiet:
-                        ui.param_found(param.label, saved_val, cfg.paths.settings_file, param.secret)
+                        ui.param_found(
+                            param.label,
+                            saved_val,
+                            cfg.paths.settings_file,
+                            param.secret,
+                        )
                     continue
                 if not quiet:
-                    ui.param_found(param.label, current, t("config.source_auto"), param.secret)
+                    ui.param_found(
+                        param.label, current, t("config.source_auto"), param.secret
+                    )
                 continue
             if not quiet:
                 ui.param_found(param.label, current, "defaults.toml", param.secret)
             continue
 
         # FortiVPN trusted_cert with cert_mode=auto: skip wizard, handled below
-        if (tcfg.type == "fortivpn" and param.key == "trusted_cert"
-                and tcfg.auth.get("cert_mode") == "auto"):
+        if (
+            tcfg.type == "fortivpn"
+            and param.key == "trusted_cert"
+            and tcfg.auth.get("cert_mode") == "auto"
+        ):
             continue
 
         # Non-interactive params: resolve from ENV/saved only, no wizard
@@ -214,7 +239,10 @@ def resolve_tunnel_params(
 
 
 def _handle_forti_cert(
-    tcfg: TunnelConfig, tunnel_saved: dict, *, quiet: bool = False,
+    tcfg: TunnelConfig,
+    tunnel_saved: dict,
+    *,
+    quiet: bool = False,
 ) -> None:
     """Handle FortiVPN trusted_cert: auto-generate or resolve from ENV/saved."""
     cert_mode = tcfg.auth.get("cert_mode", "")
@@ -237,7 +265,9 @@ def _handle_forti_cert(
     saved_val = tunnel_saved.get("trusted_cert", "")
     if saved_val:
         if not quiet:
-            ui.param_found("param.cert_sha256", saved_val, cfg.paths.settings_file, False)
+            ui.param_found(
+                "param.cert_sha256", saved_val, cfg.paths.settings_file, False
+            )
         tcfg.auth["trusted_cert"] = saved_val
         return
 
@@ -259,7 +289,9 @@ def _handle_forti_cert(
             raise SetupRequiredError(
                 t("config.cert_not_generated", host=host, port=port)
             )
-        print(f"  {ui.RED}❌{ui.NC} {t('config.cert_connect_failed', host=host, port=port)}")
+        print(
+            f"  {ui.RED}❌{ui.NC} {t('config.cert_connect_failed', host=host, port=port)}"
+        )
         ui.param_missing("param.cert_sha256")
         tcfg.auth["trusted_cert"] = ui.wizard_input(cert_label, "", False)
 
@@ -272,17 +304,15 @@ def resolve_tunnel_routes(
 ) -> None:
     """Resolve routes for a tunnel: TOML targets -> parse, or wizard."""
     # Advanced mode: TOML already has explicit routes - skip wizard
-    has_advanced = bool(
-        tcfg.routes.get("networks")
-        or tcfg.routes.get("hosts")
-    )
+    has_advanced = bool(tcfg.routes.get("networks") or tcfg.routes.get("hosts"))
     if has_advanced and not quiet:
         nets = tcfg.routes.get("networks", [])
         hosts = tcfg.routes.get("hosts", [])
         ui.param_found(
             t("config.routes_label", name=tcfg.name),
             t("config.routes_count", nets=len(nets), hosts=len(hosts)),
-            "defaults.toml", False,
+            "defaults.toml",
+            False,
         )
 
     # Get targets: TOML -> saved -> wizard
@@ -295,12 +325,15 @@ def resolve_tunnel_routes(
             targets = tunnel_saved["targets"]
             if not quiet:
                 if targets:
-                    ui.param_found("Targets", ", ".join(targets), cfg.paths.settings_file, False)
+                    ui.param_found(
+                        "Targets", ", ".join(targets), cfg.paths.settings_file, False
+                    )
                 else:
                     ui.param_found(
                         t("config.routes_label", name=tcfg.name),
                         t("config.routes_native"),
-                        cfg.paths.settings_file, False,
+                        cfg.paths.settings_file,
+                        False,
                     )
             resolved = True
 
@@ -387,7 +420,9 @@ def _write_settings(data: dict, script_dir: Path) -> None:
         except OSError:
             pass
         raise
-    print(f"  {ui.GREEN}💾 {t('config.settings_saved')}{ui.NC} {ui.DIM}({cfg.paths.settings_file}){ui.NC}")
+    print(
+        f"  {ui.GREEN}💾 {t('config.settings_saved')}{ui.NC} {ui.DIM}({cfg.paths.settings_file}){ui.NC}"
+    )
 
 
 def _chown_to_real_user(path: str) -> None:
@@ -442,8 +477,12 @@ def prepare_log_files(tunnels: list[TunnelConfig]) -> None:
 
 # --- Param resolution: ENV -> saved -> wizard ---
 
+
 def _resolve_silent(
-    param: ConfigParam, tunnel_saved: dict, *, quiet: bool = False,
+    param: ConfigParam,
+    tunnel_saved: dict,
+    *,
+    quiet: bool = False,
 ) -> str:
     """Resolve param from ENV/saved only (no wizard prompt)."""
     if param.env_var:
@@ -455,7 +494,9 @@ def _resolve_silent(
     saved_val = tunnel_saved.get(param.key, "")
     if saved_val:
         if not quiet:
-            ui.param_found(param.label, saved_val, cfg.paths.settings_file, param.secret)
+            ui.param_found(
+                param.label, saved_val, cfg.paths.settings_file, param.secret
+            )
         return saved_val
     return param.default
 
@@ -486,9 +527,7 @@ def _resolve_param(
     if quiet:
         if default:
             return default
-        raise SetupRequiredError(
-            t("config.param_not_set", label=t(label))
-        )
+        raise SetupRequiredError(t("config.param_not_set", label=t(label)))
 
     # 4. Default from defaults.toml (show as placeholder in wizard)
     if default and not secret:

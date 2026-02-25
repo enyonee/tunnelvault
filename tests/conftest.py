@@ -21,6 +21,13 @@ def _pin_locale_and_reset():
     i18n.reset()
 
 
+@pytest.fixture(autouse=True)
+def _assume_binaries_installed(monkeypatch):
+    """Default: all VPN binaries available. Override in specific tests."""
+    from tv.vpn.base import TunnelPlugin
+    monkeypatch.setattr(TunnelPlugin, "check_binary", classmethod(lambda cls: True))
+
+
 # Ensure all VPN plugins are registered for the entire test suite.
 import tv.vpn.openvpn as _ovpn  # noqa: F401,E402
 import tv.vpn.fortivpn as _forti  # noqa: F401,E402

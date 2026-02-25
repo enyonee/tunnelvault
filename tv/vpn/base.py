@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -61,6 +62,10 @@ class TunnelPlugin(ABC):
     Routes, DNS, disconnect get sensible defaults that can be overridden.
     """
 
+    # Executable binary name (e.g. "openvpn", "sing-box", "openfortivpn").
+    # Override in subclasses. Used by check_binary() to verify the package is installed.
+    binary: str = ""
+
     # Human-readable name for the tunnel TYPE (used in proto line, no instance needed).
     # Override in subclasses. Falls back to registry key if empty.
     type_display_name: str = ""
@@ -85,6 +90,11 @@ class TunnelPlugin(ABC):
         self.log = log
         self.script_dir = script_dir
         self._pid: Optional[int] = None
+
+    @classmethod
+    def check_binary(cls) -> bool:
+        """Check if the plugin's binary is available on PATH."""
+        return bool(cls.binary and shutil.which(cls.binary))
 
     @classmethod
     def config_schema(cls) -> list[ConfigParam]:

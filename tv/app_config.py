@@ -33,6 +33,8 @@ class Timeouts:
     cleanup_sleep: float = 1.0
     ping_warmup: int = 2
     ps_aux: int = 10
+    keepalive_interval: int = 30
+    keepalive_reconnect_pause: float = 2.0
 
 
 @dataclass

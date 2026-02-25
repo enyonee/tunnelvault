@@ -46,6 +46,13 @@ def run(defs: dict, script_dir: Path) -> bool:
                 f"{prefix}: {t('validate.unknown_type', type=ttype, available=', '.join(sorted(known_types)))}"
             )
 
+        # binary availability
+        if ttype in known_types:
+            plugin_cls = get_plugin(ttype)
+            if not plugin_cls.check_binary():
+                binary = plugin_cls.binary or ttype
+                warnings.append(f"{prefix}: {t('validate.binary_not_found', binary=binary)}")
+
         # config_file
         cf = raw.get("config_file", "")
         if cf:

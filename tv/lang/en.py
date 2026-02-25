@@ -43,6 +43,13 @@ STRINGS: dict[str, str] = {
     "main.file_not_found": "File not found: {path}",
     "main.needs_sudo": "This command requires root privileges (sudo)",
     "main.not_connected": "not connected",
+    "main.skipped_binary": "Profile '{name}' skipped - '{binary}' is not installed",
+    "main.keepalive_started": "Keepalive: monitoring every {interval}s (auto-reconnect on sleep/wake)",
+    "main.keepalive_reconnecting": "Reconnecting ({reason})...",
+    "main.keepalive_reason_wake": "wake from sleep",
+    "main.keepalive_reason_dead": "dead process",
+    "main.keepalive_reconnected": "Reconnected {ok}/{total}: {names}",
+    "main.keepalive_failed": "Reconnect failed: {error}",
 
     # --- config.py ---
     "config.settings_loaded": "Settings: loaded",
@@ -98,6 +105,8 @@ STRINGS: dict[str, str] = {
     "engine.profiles": "Profiles: {names}",
     "engine.params_section": "Parameters: {name}",
     "engine.settings_incomplete": "Settings incomplete, starting wizard...",
+    "engine.binary_not_found": "'{binary}' not found, skipping profile '{name}' (install the package to use it)",
+    "engine.no_available_tunnels": "No tunnels available - all required VPN packages are missing",
 
     # --- disconnect.py ---
     "disc.deleting_routes": "Deleting routes...",
@@ -135,6 +144,7 @@ STRINGS: dict[str, str] = {
     "validate.dns_no_ns": "dns.domains without dns.nameservers",
     "validate.param_needs_env": "auth.{key} ({label}) not set - will need ENV/wizard",
     "validate.config_will_default": "config_file ({label}) not set - will use default",
+    "validate.binary_not_found": "'{binary}' not installed - this tunnel will be skipped",
     "validate.missing_check_host": "checks.ports: missing 'host'",
     "validate.missing_check_port": "checks.ports: missing 'port'",
     "validate.suffix_no_dot": "'{suffix}' does not start with dot",
@@ -188,6 +198,18 @@ STRINGS: dict[str, str] = {
     "param.cert_sha256": "SHA256 certificate",
     "param.fallback_gw": "Fallback GW",
 
+    # --- daemon.py ---
+    "daemon.installed": "Daemon installed and loaded",
+    "daemon.install_failed": "Daemon install failed: {error}",
+    "daemon.uninstalled": "Daemon unloaded and removed",
+    "daemon.not_installed": "Daemon not installed",
+    "daemon.label": "Service",
+    "daemon.status_label": "Status",
+    "daemon.plist_label": "Plist",
+    "daemon.running": "running",
+    "daemon.stopped": "stopped",
+    "daemon.log_hint": "Log: tail -f {path}",
+
     # --- routing.py ---
     "routing.wildcard_no_dot": "*.{domain} - domain must contain a dot (*.example.local)",
     "routing.invalid_cidr": "{target} - invalid CIDR",
@@ -215,4 +237,6 @@ STRINGS: dict[str, str] = {
     "cli.logs": "Log files (--logs) or tail (--logs openvpn)",
     "cli.watch": "Real-time VPN traffic monitoring",
     "cli.all": "Show all VPN interfaces (including system)",
+    "cli.keepalive": "Stay running and auto-reconnect on sleep/wake",
+    "cli.daemon": "Daemon: install/uninstall/status (launchd keepalive service)",
 }

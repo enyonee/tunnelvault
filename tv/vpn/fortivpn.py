@@ -57,6 +57,7 @@ def _show_error(forti_proc, forti_log: Path, log: Logger, label: str = "ppp") ->
 class FortiVPNPlugin(TunnelPlugin):
     """FortiVPN tunnel plugin with PPP gateway detection."""
 
+    binary = "openfortivpn"
     type_display_name = "FortiVPN"
     process_names = ["openfortivpn"]
     kill_patterns = ["openfortivpn -c /tmp/forti_"]

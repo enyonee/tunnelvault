@@ -7,6 +7,7 @@ import os
 import signal
 import subprocess
 import sys
+import time
 import traceback
 from pathlib import Path
 
@@ -19,6 +20,7 @@ from tv.i18n import t
 from tv.logger import Logger
 from tv.vpn.base import TunnelConfig
 from tv.vpn.registry import get_plugin
+
 # Ensure all plugins are registered on import
 from tv.vpn import openvpn, fortivpn, singbox  # noqa: F401
 
@@ -33,8 +35,14 @@ def main() -> None:
 
     # Mutual exclusion check
     exclusive = [
-        args.disconnect, args.status, args.check, args.reset,
-        args.validate, args.logs is not None, args.watch,
+        args.disconnect,
+        args.status,
+        args.check,
+        args.reset,
+        args.validate,
+        args.logs is not None,
+        args.watch,
+        args.daemon is not None,
     ]
     if sum(bool(x) for x in exclusive) > 1:
         ui.fail(t("main.one_command"))
@@ -44,14 +52,31 @@ def main() -> None:
 
     if args.status:
         from tv import status
+
         status.run()
         return
 
     if args.watch:
         exact_names, prefix_names = _try_load_tunnel_names(script_dir, args.only)
         from tv import watch
-        show_all = getattr(args, 'all', False)
+
+        show_all = getattr(args, "all", False)
         watch.run(exact_names=exact_names, prefix_names=prefix_names, show_all=show_all)
+        return
+
+    if args.daemon:
+        from tv import daemon
+
+        if args.daemon == "status":
+            daemon.run_status()
+            return
+        # install/uninstall need root
+        if os.geteuid() != 0:
+            ui.warn(t("main.needs_sudo"))
+        if args.daemon == "install":
+            daemon.run_install(script_dir, only=args.only)
+        elif args.daemon == "uninstall":
+            daemon.run_uninstall()
         return
 
     # --- Commands that need root ---
@@ -69,6 +94,7 @@ def main() -> None:
 
     # Initialize i18n from config (after defaults.toml loaded [app].locale)
     from tv import i18n
+
     if cfg.locale:
         i18n.init(cfg.locale)
 
@@ -78,6 +104,7 @@ def main() -> None:
 
     if args.validate:
         from tv import validate as validate_mod
+
         sys.exit(0 if validate_mod.run(defs, script_dir) else 1)
 
     if args.disconnect:
@@ -125,7 +152,10 @@ def main() -> None:
             sys.exit(128 + sig)
         _handling_signal = True
         name = signal.Signals(sig).name
-        print(f"\n  {ui.YELLOW}{ui.BOLD}⚠ {t('main.interrupted', name=name)}{ui.NC}", file=sys.stderr)
+        print(
+            f"\n  {ui.YELLOW}{ui.BOLD}⚠ {t('main.interrupted', name=name)}{ui.NC}",
+            file=sys.stderr,
+        )
         engine.log.log("WARN", f"Interrupted by {name}")
         print(f"  {ui.DIM}{t('main.cleaning_vpn')}{ui.NC}", file=sys.stderr)
         try:
@@ -136,7 +166,10 @@ def main() -> None:
                 disconnect.run(engine.net, engine.log, defs, script_dir=script_dir)
             except Exception as exc:
                 print(f"  {ui.DIM}cleanup error: {exc}{ui.NC}", file=sys.stderr)
-        print(f"  {ui.DIM}{t('main.log_colon', path=engine.log.log_path)}{ui.NC}", file=sys.stderr)
+        print(
+            f"  {ui.DIM}{t('main.log_colon', path=engine.log.log_path)}{ui.NC}",
+            file=sys.stderr,
+        )
         sys.exit(128 + sig)
 
     signal.signal(signal.SIGINT, on_signal)
@@ -156,12 +189,24 @@ def main() -> None:
 
     engine.prepare(setup=args.setup)
 
+    if not engine.tunnels:
+        engine.log.log("WARN", "No tunnels to connect")
+        sys.exit(1)
+
     # --only filter after prepare (tunnels resolved)
     try:
         if args.only:
             engine.tunnels = defaults_mod.filter_tunnels(engine.tunnels, args.only)
     except ValueError as e:
-        ui.fail(str(e))
+        # Better message if tunnel was skipped due to missing binary
+        requested = [n.strip() for n in args.only.split(",") if n.strip()]
+        skipped = [n for n in requested if n in engine.skipped_binaries]
+        if skipped:
+            for name in skipped:
+                binary = engine.skipped_binaries[name]
+                ui.fail(t("main.skipped_binary", name=name, binary=binary))
+        else:
+            ui.fail(str(e))
         sys.exit(1)
 
     engine.setup(clear=args.clear, quiet=quiet)
@@ -178,6 +223,10 @@ def main() -> None:
             engine.log.log("INFO", f"{tcfg.name}: ok={r.ok}")
         engine.log.log("INFO", f"Log: {engine.log.log_path}")
 
+    # --- Keepalive ---
+    if args.keepalive:
+        _keepalive_loop(engine)
+
 
 # VPN type -> interface prefixes for dynamic matching
 _TYPE_PREFIXES: dict[str, list[str]] = {
@@ -188,7 +237,8 @@ _TYPE_PREFIXES: dict[str, list[str]] = {
 
 
 def _try_load_tunnel_names(
-    script_dir: Path, only: str | None = None,
+    script_dir: Path,
+    only: str | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Best-effort: load tunnel name mappings from defaults.toml + watch state.
 
@@ -211,6 +261,7 @@ def _try_load_tunnel_names(
             data = tomllib.load(f)
 
         from tv import app_config
+
         app_config.load(data.get("app", {}))
 
         tunnels = defaults_mod.parse_tunnels(data)
@@ -219,6 +270,7 @@ def _try_load_tunnel_names(
 
         # Priority 1: saved state from last connect (exact PID-verified interface)
         from tv.engine import load_watch_state
+
         exact: dict[str, str] = load_watch_state(script_dir)
 
         # Priority 2: configured interface from defaults.toml
@@ -258,7 +310,9 @@ def _run_check_only(tunnels: list[TunnelConfig], script_dir: Path) -> None:
     passed = sum(1 for r in results if r.status == "ok")
     failed = sum(1 for r in results if r.status == "fail")
     skipped = sum(1 for r in results if r.status == "skip")
-    print(f"\n  {t('main.total', passed=f'{ui.GREEN}{passed}{ui.NC}', failed=f'{ui.RED}{failed}{ui.NC}', skipped=f'{ui.DIM}{skipped}{ui.NC}')}")
+    print(
+        f"\n  {t('main.total', passed=f'{ui.GREEN}{passed}{ui.NC}', failed=f'{ui.RED}{failed}{ui.NC}', skipped=f'{ui.DIM}{skipped}{ui.NC}')}"
+    )
 
     if ext_ip:
         print(f"  {t('main.external_ip', ip=ext_ip)}")
@@ -266,7 +320,9 @@ def _run_check_only(tunnels: list[TunnelConfig], script_dir: Path) -> None:
 
 
 def _run_logs(
-    tunnels: list[TunnelConfig], name: str, script_dir: Path,
+    tunnels: list[TunnelConfig],
+    name: str,
+    script_dir: Path,
 ) -> None:
     """Show log paths or tail a specific log."""
     log_dir = config.resolve_log_dir(script_dir)
@@ -294,9 +350,7 @@ def _run_logs(
         return
 
     if name not in available:
-        names_list = ", ".join(
-            n for n in sorted(available) if n != "main"
-        )
+        names_list = ", ".join(n for n in sorted(available) if n != "main")
         ui.fail(t("main.unknown_log", name=name, available=names_list))
         sys.exit(1)
 
@@ -337,21 +391,98 @@ def _log_summary(engine: Engine, check_results: list, ext_ip: str) -> None:
     )
 
 
+def _keepalive_loop(engine: Engine) -> None:
+    """Monitor VPN processes, reconnect when dead (e.g. after macOS sleep)."""
+    interval = cfg.timeouts.keepalive_interval
+    ui.info(f"🔄 {t('main.keepalive_started', interval=interval)}")
+    engine.log.log("INFO", f"Keepalive mode: checking every {interval}s")
+
+    last_tick = time.monotonic()
+    reconnect_count = 0
+
+    while True:
+        time.sleep(interval)
+        now = time.monotonic()
+        elapsed = now - last_tick
+        last_tick = now
+
+        # Detect sleep: elapsed >> interval means system was suspended
+        slept = elapsed > interval * 2
+
+        dead = engine.check_alive()
+
+        if not slept and not dead:
+            continue
+
+        # Determine reason
+        if slept and dead:
+            reason = "wake"
+            dead_names = ", ".join(tc.name for tc, _ in dead)
+            engine.log.log(
+                "INFO",
+                f"Keepalive: wake from sleep detected (elapsed={elapsed:.0f}s), dead: {dead_names}",
+            )
+        elif slept:
+            reason = "wake"
+            engine.log.log(
+                "INFO",
+                f"Keepalive: wake from sleep detected (elapsed={elapsed:.0f}s), proactive reconnect",
+            )
+        else:
+            reason = "dead"
+            dead_names = ", ".join(tc.name for tc, pid in dead)
+            engine.log.log("WARN", f"Keepalive: dead processes: {dead_names}")
+
+        reason_display = (
+            t("main.keepalive_reason_wake")
+            if reason == "wake"
+            else t("main.keepalive_reason_dead")
+        )
+        print(
+            f"\n  {ui.YELLOW}🔄 {t('main.keepalive_reconnecting', reason=reason_display)}{ui.NC}"
+        )
+
+        try:
+            check_results, ext_ip = engine.reconnect_all(quiet=True)
+            reconnect_count += 1
+        except Exception as e:
+            engine.log.log("ERROR", f"Keepalive reconnect failed: {e}")
+            ui.fail(t("main.keepalive_failed", error=str(e)))
+            continue
+
+        ok_count = sum(1 for r in engine.results if r.ok)
+        total = len(engine.results)
+        names = ", ".join(
+            tc.name for tc, r in zip(engine.tunnels, engine.results) if r.ok
+        )
+        ui.ok(t("main.keepalive_reconnected", ok=ok_count, total=total, names=names))
+        engine.log.log(
+            "INFO",
+            f"Keepalive: reconnected {ok_count}/{total} (total reconnects: {reconnect_count})",
+        )
+
+
 def _crash_diagnostics(log: Logger | None, exc: BaseException) -> None:
     """Log crash state for post-mortem debugging."""
     print(f"\n  {ui.RED}{ui.BOLD}💥 {t('main.crashed')}{ui.NC}", file=sys.stderr)
     print(f"  {ui.RED}├─ {type(exc).__name__}: {exc}{ui.NC}", file=sys.stderr)
     if log:
-        print(f"  {ui.RED}└─ {t('main.log_colon', path=log.log_path)}{ui.NC}", file=sys.stderr)
+        print(
+            f"  {ui.RED}└─ {t('main.log_colon', path=log.log_path)}{ui.NC}",
+            file=sys.stderr,
+        )
         log.log("FATAL", f"{type(exc).__name__}: {exc}")
         log.log("FATAL", traceback.format_exc())
         from tv.vpn.registry import available_types, get_plugin
+
         vpn_keywords = []
         for tp in available_types():
             vpn_keywords.extend(get_plugin(tp).process_names)
 
         r = subprocess.run(
-            ["ps", "aux"], capture_output=True, text=True,
+            ["ps", "aux"],
+            capture_output=True,
+            text=True,
             timeout=cfg.timeouts.ps_aux,
         )
         for line in r.stdout.splitlines():

@@ -38,6 +38,7 @@ def _show_error(pid: int | None, log_path: Path, log: Logger) -> None:
 class OpenVPNPlugin(TunnelPlugin):
     """OpenVPN tunnel plugin with Tunnelblick detection."""
 
+    binary = "openvpn"
     type_display_name = "OpenVPN"
     process_names = ["openvpn"]
     kill_patterns = [
