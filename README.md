@@ -310,6 +310,13 @@ class MyVPNPlugin(TunnelPlugin):
 
 </details>
 
+## <img src="https://img.shields.io/badge/🗺_Roadmap-2FBFBF?style=for-the-badge" alt="Roadmap">
+
+- [ ] `--check` rerun - re-run health checks with retry/loop until all pass
+- [ ] Plugin-defined checks - each VPN plugin declares default checks in code, no manual TOML needed
+- [ ] Configurable check list - override/extend plugin checks via external file
+- [ ] Windows support - routing, DNS, process management for Windows
+
 ## <img src="https://img.shields.io/badge/📋_Requirements-FF8C00?style=for-the-badge" alt="Requirements">
 
 **Python 3.10+** · **macOS or Linux** · **sudo** · VPN tools you need (`openvpn`, `openfortivpn`, `sing-box`)

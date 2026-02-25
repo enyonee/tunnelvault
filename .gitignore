@@ -34,5 +34,8 @@ logs/
 # pytest
 .pytest_cache/
 
+# Tasks
+tasks/
+
 # OS
 .DS_Store
