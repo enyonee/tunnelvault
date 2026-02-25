@@ -223,8 +223,8 @@ def main() -> None:
             engine.log.log("INFO", f"{tcfg.name}: ok={r.ok}")
         engine.log.log("INFO", f"Log: {engine.log.log_path}")
 
-    # --- Keepalive ---
-    if args.keepalive:
+    # --- Keepalive (default, unless --no-daemon) ---
+    if not args.no_daemon:
         _keepalive_loop(engine)
 
 

@@ -237,6 +237,6 @@ STRINGS: dict[str, str] = {
     "cli.logs": "Лог-файлы (--logs) или tail (--logs openvpn)",
     "cli.watch": "Мониторинг VPN-трафика в реальном времени",
     "cli.all": "Показать все VPN-интерфейсы (включая системные)",
-    "cli.keepalive": "Оставаться запущенным и авто-реконнект при sleep/wake",
+    "cli.no_daemon": "Выйти после подключения (не оставаться запущенным)",
     "cli.daemon": "Демон: install/uninstall/status (launchd keepalive сервис)",
 }

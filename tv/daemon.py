@@ -119,7 +119,7 @@ def _build_plist(script_dir: Path, *, only: str | None = None) -> dict:
     script = str((script_dir / "tunnelvault.py").resolve())
     python = sys.executable
 
-    args = [python, script, "--keepalive"]
+    args = [python, script]
     if only:
         args.extend(["--only", only])
 

@@ -46,7 +46,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--logs", nargs="?", const="", default=None, help=t("cli.logs"))
     p.add_argument("--watch", action="store_true", help=t("cli.watch"))
     p.add_argument("--all", action="store_true", help=t("cli.all"))
-    p.add_argument("--keepalive", action="store_true", help=t("cli.keepalive"))
+    p.add_argument("--no-daemon", action="store_true", help=t("cli.no_daemon"))
     p.add_argument(
         "--daemon",
         choices=["install", "uninstall", "status"],

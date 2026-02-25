@@ -21,7 +21,6 @@ class TestBuildPlist:
         assert plist["Label"] == "com.tunnelvault.keepalive"
         assert plist["RunAtLoad"] is True
         assert plist["KeepAlive"] is True
-        assert "--keepalive" in plist["ProgramArguments"]
         assert "--only" not in plist["ProgramArguments"]
         assert plist["WorkingDirectory"] == str(tmp_dir.resolve())
 
@@ -151,7 +150,7 @@ class TestRunInstall:
         # Verify it's valid plist
         data = plistlib.loads(plist_path.read_bytes())
         assert data["Label"] == "com.tunnelvault.keepalive"
-        assert "--keepalive" in data["ProgramArguments"]
+        assert data["Label"] == "com.tunnelvault.keepalive"
 
     def test_unloads_existing_before_install(self, tmp_dir, tmp_path):
         plist_path = tmp_path / "test.plist"
