@@ -235,7 +235,11 @@ class Engine:
 
         Merges with existing state so --only runs don't erase other tunnels.
         Dead PIDs are cleaned up on read (load_watch_state).
+        Uses atomic write (tempfile + rename) to prevent corruption on crash.
         """
+        import os
+        import tempfile
+
         path = config.resolve_log_dir(self.script_dir) / "watch-state.json"
         try:
             existing = json.loads(path.read_text()) if path.exists() else {}
@@ -253,7 +257,12 @@ class Engine:
                 del existing[tcfg.name]
 
         try:
-            path.write_text(json.dumps(existing))
+            fd, tmp_path = tempfile.mkstemp(dir=str(path.parent), suffix=".tmp")
+            try:
+                os.write(fd, json.dumps(existing).encode())
+            finally:
+                os.close(fd)
+            os.rename(tmp_path, str(path))
         except OSError:
             pass
 

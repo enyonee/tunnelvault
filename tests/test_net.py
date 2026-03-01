@@ -355,15 +355,11 @@ class TestLinuxNet:
         assert "172.18.0.0/16" in args
 
     @patch("subprocess.run")
-    def test_setup_dns_resolver_with_resolvectl(self, mock_run, linux_net):
-        """Linux: resolvectl для DNS через ppp0 (default)."""
-        mock_run.return_value = subprocess.CompletedProcess([], 0, "", "")
-        with patch("shutil.which", return_value="/usr/bin/resolvectl"):
-            results = linux_net.setup_dns_resolver(["test.local"], ["10.0.0.1"])
-        assert results["test.local"] is True
-        # Verify ppp0 used as default interface
-        link_call = mock_run.call_args_list[0]
-        assert link_call[0][0] == ["ip", "link", "show", "ppp0"]
+    def test_setup_dns_resolver_no_interface_returns_false(self, mock_run, linux_net):
+        """Linux: без interface resolvectl не вызывается, все домены False."""
+        results = linux_net.setup_dns_resolver(["test.local"], ["10.0.0.1"])
+        assert results["test.local"] is False
+        mock_run.assert_not_called()
 
     @patch("subprocess.run")
     def test_setup_dns_custom_interface(self, mock_run, linux_net):

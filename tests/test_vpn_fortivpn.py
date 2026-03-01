@@ -400,13 +400,14 @@ class TestRoutingMode:
 class TestPlatformPing:
     """Background ping uses correct flags per platform."""
 
-    @pytest.mark.parametrize("platform,flag,absent_flag", [
-        ("Darwin", "-t", "-W"),
-        ("Linux", "-W", "-t"),
+    @pytest.mark.parametrize("platform_name,flag,absent_flags", [
+        ("Darwin", "-t", ["-W", "-n"]),
+        ("Linux", "-W", ["-t", "-n"]),
+        ("Windows", "-n", ["-c"]),
     ])
-    def test_ping_uses_platform_flag(self, plugin, platform, flag, absent_flag):
+    def test_ping_uses_platform_flag(self, plugin, platform_name, flag, absent_flags):
         with _forti_connect_ok(plugin) as (mock_proc, _), \
-             patch("tv.vpn.fortivpn.platform.system", return_value=platform):
+             patch("tv.vpn.fortivpn.platform.system", return_value=platform_name):
             plugin.connect()
 
         ping_calls = [
@@ -416,7 +417,23 @@ class TestPlatformPing:
         assert len(ping_calls) == 1
         ping_cmd = ping_calls[0][0][0]
         assert flag in ping_cmd
-        assert absent_flag not in ping_cmd
+        for absent in absent_flags:
+            assert absent not in ping_cmd
+
+    def test_windows_ping_timeout_in_milliseconds(self, plugin):
+        """On Windows, -w value is in milliseconds (warmup * 1000)."""
+        with _forti_connect_ok(plugin) as (mock_proc, _), \
+             patch("tv.vpn.fortivpn.platform.system", return_value="Windows"):
+            plugin.connect()
+
+        ping_calls = [
+            c for c in mock_proc.run_background.call_args_list
+            if c[0][0][0] == "ping"
+        ]
+        ping_cmd = ping_calls[0][0][0]
+        w_idx = ping_cmd.index("-w")
+        w_val = int(ping_cmd[w_idx + 1])
+        assert w_val >= 1000
 
 
 class TestDnsInterface:

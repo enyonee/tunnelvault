@@ -362,7 +362,11 @@ class LinuxNet(NetManager):
         interface: str = "",
     ) -> dict[str, bool]:
         results: dict[str, bool] = {}
-        iface = interface or "ppp0"
+        iface = interface
+        if not iface:
+            for domain in domains:
+                results[domain] = False
+            return results
         if shutil.which("resolvectl"):
             r = _run(["ip", "link", "show", iface])
             if r.returncode == 0:
@@ -376,7 +380,9 @@ class LinuxNet(NetManager):
         return results
 
     def cleanup_dns_resolver(self, domains: list[str], interface: str = "") -> None:
-        iface = interface or "ppp0"
+        iface = interface
+        if not iface:
+            return
         if shutil.which("resolvectl"):
             _run(["sudo", "resolvectl", "revert", iface])
 

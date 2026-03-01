@@ -10,6 +10,7 @@ from tv import proc, ui
 from tv.app_config import cfg
 from tv.i18n import t
 from tv.logger import Logger
+from tv.proc import IS_WINDOWS
 from tv.vpn.base import ConfigParam, TunnelPlugin, VPNResult
 from tv.vpn.registry import register
 
@@ -40,10 +41,10 @@ class OpenVPNPlugin(TunnelPlugin):
 
     binary = "openvpn"
     type_display_name = "OpenVPN"
-    process_names = ["openvpn"]
-    kill_patterns = [
+    process_names = ("openvpn",)
+    kill_patterns = (
         "openvpn --config .*/tunnelvault/",
-    ]
+    )
 
     @classmethod
     def emergency_patterns(cls, script_dir) -> list[str]:
@@ -76,8 +77,8 @@ class OpenVPNPlugin(TunnelPlugin):
 
         self.log.log("INFO", f"Config: {config_path}")
 
-        # --- Tunnelblick detection ---
-        if proc.find_pids("Tunnelblick"):
+        # --- Tunnelblick detection (macOS only) ---
+        if not IS_WINDOWS and proc.find_pids("Tunnelblick"):
             tb_ovpn = proc.find_pids("Tunnelblick.*openvpn")
             if tb_ovpn:
                 pid = tb_ovpn[0]
@@ -87,42 +88,57 @@ class OpenVPNPlugin(TunnelPlugin):
                 self.log.log("INFO", "OpenVPN: using Tunnelblick")
                 return VPNResult(ok=True, detail="Tunnelblick")
 
-        # Snapshot interfaces BEFORE connect (for tun detection)
+        # Snapshot interfaces BEFORE connect (for interface detection)
         ifaces_before = set(self.net.interfaces().keys())
 
         # --- Launch ---
-        self.log.log("INFO", f"Launch: sudo openvpn --config {config_path} --daemon --log {log_path}")
-        proc.run(
-            ["openvpn", "--config", str(config_path), "--daemon", "--log", str(log_path)],
-            sudo=True,
-        )
-
-        # Find PID (openvpn --daemon forks; poll up to 1.5s for forked process)
-        pid = None
-        for _ in range(3):
-            time.sleep(0.5)
-            pids = proc.find_pids(f"openvpn --config {config_path}")
-            if pids:
-                pid = pids[0]
-                break
+        if IS_WINDOWS:
+            # Windows: no --daemon (POSIX-only), use run_background()
+            self.log.log("INFO", f"Launch: openvpn --config {config_path} --log {log_path}")
+            ovpn_proc = proc.run_background(
+                ["openvpn", "--config", str(config_path), "--log", str(log_path)],
+                sudo=True,
+            )
+            pid = ovpn_proc.pid
+        else:
+            self.log.log("INFO", f"Launch: sudo openvpn --config {config_path} --daemon --log {log_path}")
+            proc.run(
+                ["openvpn", "--config", str(config_path), "--daemon", "--log", str(log_path)],
+                sudo=True,
+            )
+            # Find PID (openvpn --daemon forks; poll up to 1.5s for forked process)
+            pid = None
+            for _ in range(3):
+                time.sleep(0.5)
+                pids = proc.find_pids(f"openvpn --config {config_path}")
+                if pids:
+                    pid = pids[0]
+                    break
         self._pid = pid
 
         if pid:
             detected_iface = None
 
-            def _check_new_tun():
+            def _check_new_iface():
                 nonlocal detected_iface
                 ifaces_now = set(self.net.interfaces().keys())
-                new_tun = [
-                    i for i in (ifaces_now - ifaces_before)
-                    if i.startswith("tun") or i.startswith("utun")
-                ]
-                if new_tun:
-                    detected_iface = sorted(new_tun)[0]
-                    return True
+                new_ifaces = list(ifaces_now - ifaces_before)
+                if IS_WINDOWS:
+                    # Windows: TAP-Windows/Wintun adapters have arbitrary names
+                    if new_ifaces:
+                        detected_iface = sorted(new_ifaces)[0]
+                        return True
+                else:
+                    new_tun = [
+                        i for i in new_ifaces
+                        if i.startswith("tun") or i.startswith("utun")
+                    ]
+                    if new_tun:
+                        detected_iface = sorted(new_tun)[0]
+                        return True
                 return False
 
-            if proc.wait_for("OpenVPN", _check_new_tun, cfg.timeouts.openvpn_init, self.log):
+            if proc.wait_for("OpenVPN", _check_new_iface, cfg.timeouts.openvpn_init, self.log):
                 if not self.cfg.interface:
                     self.cfg.interface = detected_iface
 

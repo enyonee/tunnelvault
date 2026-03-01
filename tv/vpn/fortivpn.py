@@ -13,6 +13,7 @@ from tv.app_config import cfg
 from tv.i18n import t
 from tv.logger import Logger
 from tv.net import NetManager
+from tv.proc import IS_WINDOWS
 from tv.vpn.base import ConfigParam, TunnelPlugin, VPNResult
 from tv.vpn.registry import register
 
@@ -59,8 +60,8 @@ class FortiVPNPlugin(TunnelPlugin):
 
     binary = "openfortivpn"
     type_display_name = "FortiVPN"
-    process_names = ["openfortivpn"]
-    kill_patterns = ["openfortivpn -c /tmp/forti_"]
+    process_names = ("openfortivpn",)
+    kill_patterns = (f"openfortivpn -c {cfg.paths.temp_dir}/forti_",)
 
     @classmethod
     def emergency_patterns(cls, script_dir) -> list[str]:
@@ -94,6 +95,11 @@ class FortiVPNPlugin(TunnelPlugin):
         return "FortiVPN"
 
     def connect(self) -> VPNResult:
+        if IS_WINDOWS:
+            ui.warn(t("vpn.forti.unsupported_windows"))
+            self.log.log("WARN", "openfortivpn is not available on Windows")
+            return VPNResult(ok=False, detail="unsupported on Windows")
+
         auth = self.cfg.auth
         host = auth.get("host", "")
         port = auth.get("port", cfg.defaults.fortivpn_port)
@@ -214,11 +220,14 @@ class FortiVPNPlugin(TunnelPlugin):
 
         # Background ping to warm up
         if dns_servers:
-            warmup = str(cfg.timeouts.ping_warmup)
-            if platform.system() == "Darwin":
-                ping_cmd = ["ping", "-c", "2", "-t", warmup, dns_servers[0]]
+            warmup = cfg.timeouts.ping_warmup
+            system = platform.system()
+            if system == "Windows":
+                ping_cmd = ["ping", "-n", "2", "-w", str(warmup * 1000), dns_servers[0]]
+            elif system == "Darwin":
+                ping_cmd = ["ping", "-c", "2", "-t", str(warmup), dns_servers[0]]
             else:
-                ping_cmd = ["ping", "-c", "2", "-W", warmup, dns_servers[0]]
+                ping_cmd = ["ping", "-c", "2", "-W", str(warmup), dns_servers[0]]
             proc.run_background(ping_cmd)
             self.log.log("INFO", f"Background ping {dns_servers[0]} started")
 

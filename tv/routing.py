@@ -77,34 +77,34 @@ def parse_targets(targets: list[str]) -> ParsedTargets:
     hosts: list[str] = []
     domains: list[str] = []
 
-    for t in targets:
-        t = t.strip()
-        if not t:
+    for entry in targets:
+        entry = entry.strip()
+        if not entry:
             continue
 
-        m = _WILDCARD_RE.match(t)
+        m = _WILDCARD_RE.match(entry)
         if m:
             domains.append(m.group(1))
             continue
 
-        if _CIDR_RE.match(t):
+        if _CIDR_RE.match(entry):
             try:
-                ipaddress.ip_network(t, strict=False)
+                ipaddress.ip_network(entry, strict=False)
             except ValueError:
                 continue
-            networks.append(t)
+            networks.append(entry)
             continue
 
-        if _IP_RE.match(t):
+        if _IP_RE.match(entry):
             try:
-                ipaddress.ip_address(t)
+                ipaddress.ip_address(entry)
             except ValueError:
                 continue
-            hosts.append(t)
+            hosts.append(entry)
             continue
 
         # Bare hostname
-        hosts.append(t)
+        hosts.append(entry)
 
     return ParsedTargets(networks=networks, hosts=hosts, domains=domains)
 

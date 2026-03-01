@@ -18,7 +18,7 @@ class SingBoxPlugin(TunnelPlugin):
 
     binary = "sing-box"
     type_display_name = "sing-box"
-    process_names = ["sing-box"]
+    process_names = ("sing-box",)
 
     @classmethod
     def emergency_patterns(cls, script_dir) -> list[str]:

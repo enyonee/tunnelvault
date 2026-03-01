@@ -72,11 +72,11 @@ class TunnelPlugin(ABC):
 
     # Process names for emergency cleanup (without plugin instance).
     # Override in subclasses. Used by disconnect.run() to kill lingering processes.
-    process_names: list[str] = []
+    process_names: tuple[str, ...] = ()
 
     # Regex patterns for kill_pattern() during emergency cleanup.
     # Override in subclasses that need pattern-based kill (e.g. to avoid killing Tunnelblick).
-    kill_patterns: list[str] = []
+    kill_patterns: tuple[str, ...] = ()
 
     def __init__(
         self,

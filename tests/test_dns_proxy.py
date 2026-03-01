@@ -54,12 +54,12 @@ class TestLifecycle:
     def test_start_and_stop_no_crash(self, proxy):
         """Proxy starts and stops without errors."""
         proxy.start()
-        assert proxy._running is True
+        assert not proxy._stop_event.is_set()
         assert proxy._thread is not None
         assert proxy._thread.is_alive()
 
         proxy.stop()
-        assert proxy._running is False
+        assert proxy._stop_event.is_set()
         assert proxy._thread is None
 
     def test_stop_without_start(self, proxy):
@@ -160,7 +160,7 @@ class TestHandle:
         reply_data = _make_dns_reply("mail.ru", ["93.158.134.3", "77.88.21.3"])
 
         proxy._sock = MagicMock()
-        proxy._running = True
+        proxy._stop_event.clear()
 
         with patch.object(proxy, "_forward", return_value=reply_data):
             proxy._handle(query_data, ("127.0.0.1", 12345))
@@ -179,7 +179,7 @@ class TestHandle:
         reply_data = _make_dns_reply("google.com", ["142.250.74.14"])
 
         proxy._sock = MagicMock()
-        proxy._running = True
+        proxy._stop_event.clear()
 
         with patch.object(proxy, "_forward", return_value=reply_data):
             proxy._handle(query_data, ("127.0.0.1", 12345))
@@ -191,7 +191,7 @@ class TestHandle:
         """Upstream timeout - no crash, no reply sent."""
         query_data = _make_dns_query("mail.ru")
         proxy._sock = MagicMock()
-        proxy._running = True
+        proxy._stop_event.clear()
 
         with patch.object(proxy, "_forward", return_value=None):
             proxy._handle(query_data, ("127.0.0.1", 12345))
