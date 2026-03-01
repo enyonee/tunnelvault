@@ -50,6 +50,11 @@ STRINGS: dict[str, str] = {
     "main.keepalive_reason_dead": "процесс умер",
     "main.keepalive_reconnected": "Переподключено {ok}/{total}: {names}",
     "main.keepalive_failed": "Переподключение не удалось: {error}",
+    "main.backgrounded": "Сервис запущен (PID={pid}), терминал освобождён",
+    "main.daemon_log_hint": "Лог: tail -f {path}",
+    "main.daemon_stopped": "Демон остановлен (PID={pid})",
+    "main.no_pidfile": "Запущенный демон не найден (PID-файл отсутствует)",
+    "main.stale_pidfile": "Устаревший PID-файл (процесс {pid} не запущен), очистка",
 
     # --- config.py ---
     "config.settings_loaded": "Настройки: загружены",
@@ -179,6 +184,7 @@ STRINGS: dict[str, str] = {
     "vpn.forti.connected": "FortiVPN подключен ({iface})",
     "vpn.forti.no_gw_fallback": "Не удалось определить PPP gateway, используем fallback: {gw}",
     "vpn.forti.no_gw": "Не удалось определить PPP gateway, маршруты могут не работать",
+    "vpn.forti.unsupported_windows": "openfortivpn недоступен на Windows",
 
     # --- vpn/singbox.py ---
     "vpn.sb.not_connected": "sing-box не поднялся за {timeout}с",
@@ -199,16 +205,12 @@ STRINGS: dict[str, str] = {
     "param.fallback_gw": "Fallback GW",
 
     # --- daemon.py ---
-    "daemon.installed": "Демон установлен и загружен",
-    "daemon.install_failed": "Не удалось установить демон: {error}",
-    "daemon.uninstalled": "Демон выгружен и удалён",
-    "daemon.not_installed": "Демон не установлен",
-    "daemon.label": "Сервис",
-    "daemon.status_label": "Статус",
-    "daemon.plist_label": "Plist",
-    "daemon.running": "запущен",
-    "daemon.stopped": "остановлен",
     "daemon.log_hint": "Лог: tail -f {path}",
+    "daemon.enabled": "Автозапуск включён",
+    "daemon.enable_failed": "Не удалось включить автозапуск: {error}",
+    "daemon.disabled": "Автозапуск отключён",
+    "daemon.already_disabled": "Автозапуск не настроен",
+    "daemon.systemd_unit_written": "Systemd unit записан: {path}",
 
     # --- routing.py ---
     "routing.wildcard_no_dot": "*.{domain} - домен должен содержать точку (*.example.local)",
@@ -238,5 +240,7 @@ STRINGS: dict[str, str] = {
     "cli.watch": "Мониторинг VPN-трафика в реальном времени",
     "cli.all": "Показать все VPN-интерфейсы (включая системные)",
     "cli.no_daemon": "Выйти после подключения (не оставаться запущенным)",
-    "cli.daemon": "Демон: install/uninstall/status (launchd keepalive сервис)",
+    "cli.foreground": "Остаться на переднем плане (для launchd/systemd)",
+    "cli.enable": "Включить автозапуск (launchd/systemd)",
+    "cli.disable": "Отключить автозапуск",
 }

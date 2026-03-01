@@ -1,12 +1,109 @@
-"""Tests for tv.daemon: launchd keepalive service management."""
+"""Tests for tv.daemon: daemonize, PID file, autostart management."""
 
 from __future__ import annotations
 
+import os
 import plistlib
 import subprocess
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
 from tv import daemon
+
+
+# =========================================================================
+# PID file
+# =========================================================================
+
+
+class TestPidFile:
+    def test_write_and_read(self, tmp_dir):
+        daemon.write_pid(tmp_dir, pid=42)
+        assert daemon.read_pid(tmp_dir) == 42
+
+    def test_write_default_pid(self, tmp_dir):
+        daemon.write_pid(tmp_dir)
+        assert daemon.read_pid(tmp_dir) == os.getpid()
+
+    def test_read_missing(self, tmp_dir):
+        assert daemon.read_pid(tmp_dir) is None
+
+    def test_remove(self, tmp_dir):
+        daemon.write_pid(tmp_dir, pid=99)
+        daemon.remove_pid(tmp_dir)
+        assert daemon.read_pid(tmp_dir) is None
+
+    def test_remove_missing_noop(self, tmp_dir):
+        daemon.remove_pid(tmp_dir)  # should not raise
+
+    def test_stale_pid(self, tmp_dir):
+        daemon.write_pid(tmp_dir, pid=999999)
+        assert not daemon.is_pid_alive(999999)
+
+    def test_pid_file_path(self, tmp_dir):
+        path = daemon.pid_file_path(tmp_dir)
+        assert path.name == "tunnelvault.pid"
+        assert str(tmp_dir) in str(path)
+
+
+# =========================================================================
+# daemonize
+# =========================================================================
+
+
+class TestDaemonize:
+    def test_parent_gets_child_pid(self, tmp_dir):
+        with patch("tv.daemon.os.fork", return_value=12345):
+            result = daemon.daemonize(tmp_dir)
+        assert result == 12345
+
+    def test_child_calls_setsid(self, tmp_dir):
+        with (
+            patch("tv.daemon.os.fork", return_value=0),
+            patch("tv.daemon.os.setsid") as mock_setsid,
+            patch("tv.daemon.os.open", return_value=3),
+            patch("tv.daemon.os.dup2"),
+            patch("tv.daemon.os.close"),
+            patch("tv.daemon.write_pid"),
+        ):
+            result = daemon.daemonize(tmp_dir)
+
+        assert result == 0
+        mock_setsid.assert_called_once()
+
+    def test_child_writes_pid(self, tmp_dir):
+        with (
+            patch("tv.daemon.os.fork", return_value=0),
+            patch("tv.daemon.os.setsid"),
+            patch("tv.daemon.os.open", return_value=3),
+            patch("tv.daemon.os.dup2"),
+            patch("tv.daemon.os.close"),
+            patch("tv.daemon.write_pid") as mock_write,
+        ):
+            daemon.daemonize(tmp_dir)
+
+        mock_write.assert_called_once_with(tmp_dir)
+
+    def test_child_redirects_stdio(self, tmp_dir):
+        dup2_calls = []
+
+        def track_dup2(fd, target):
+            dup2_calls.append((fd, target))
+
+        with (
+            patch("tv.daemon.os.fork", return_value=0),
+            patch("tv.daemon.os.setsid"),
+            patch("tv.daemon.os.open", return_value=3),
+            patch("tv.daemon.os.dup2", side_effect=track_dup2),
+            patch("tv.daemon.os.close"),
+            patch("tv.daemon.write_pid"),
+        ):
+            daemon.daemonize(tmp_dir)
+
+        # Should redirect stdout(1), stderr(2), stdin(0)
+        targets = [call[1] for call in dup2_calls]
+        assert 0 in targets  # stdin
+        assert 1 in targets  # stdout
+        assert 2 in targets  # stderr
 
 
 # =========================================================================
@@ -21,6 +118,7 @@ class TestBuildPlist:
         assert plist["Label"] == "com.tunnelvault.keepalive"
         assert plist["RunAtLoad"] is True
         assert plist["KeepAlive"] is True
+        assert "--foreground" in plist["ProgramArguments"]
         assert "--only" not in plist["ProgramArguments"]
         assert plist["WorkingDirectory"] == str(tmp_dir.resolve())
 
@@ -53,204 +151,126 @@ class TestBuildPlist:
 
         assert log_dir.exists()
 
-
-# =========================================================================
-# status
-# =========================================================================
-
-
-class TestStatus:
-    def test_not_installed(self, tmp_path):
-        with patch.object(daemon, "PLIST_PATH", tmp_path / "nonexistent.plist"):
-            result = daemon.status()
-
-        assert result["installed"] is False
-        assert result["running"] is False
-        assert result["pid"] is None
-
-    def test_installed_and_running(self, tmp_path):
-        plist_path = tmp_path / "test.plist"
-        plist_path.write_text("")
-
-        launchctl_output = "PID\tStatus\tLabel\n12345\t0\tcom.tunnelvault.keepalive\n"
-        mock_result = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout=launchctl_output,
-        )
-        with (
-            patch.object(daemon, "PLIST_PATH", plist_path),
-            patch("tv.daemon.subprocess.run", return_value=mock_result),
-        ):
-            result = daemon.status()
-
-        assert result["installed"] is True
-        assert result["running"] is True
-        assert result["pid"] == 12345
-
-    def test_installed_but_stopped(self, tmp_path):
-        plist_path = tmp_path / "test.plist"
-        plist_path.write_text("")
-
-        launchctl_output = "PID\tStatus\tLabel\n-\t0\tcom.tunnelvault.keepalive\n"
-        mock_result = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout=launchctl_output,
-        )
-        with (
-            patch.object(daemon, "PLIST_PATH", plist_path),
-            patch("tv.daemon.subprocess.run", return_value=mock_result),
-        ):
-            result = daemon.status()
-
-        assert result["installed"] is True
-        assert result["running"] is False
-        assert result["pid"] is None
-
-    def test_installed_not_in_launchctl_list(self, tmp_path):
-        plist_path = tmp_path / "test.plist"
-        plist_path.write_text("")
-
-        # launchctl list succeeds but label not found
-        mock_result = subprocess.CompletedProcess(
-            args=[],
-            returncode=0,
-            stdout="PID\tStatus\tLabel\n",
-        )
-        with (
-            patch.object(daemon, "PLIST_PATH", plist_path),
-            patch("tv.daemon.subprocess.run", return_value=mock_result),
-        ):
-            result = daemon.status()
-
-        assert result["installed"] is True
-        assert result["running"] is False
+    def test_plist_includes_foreground_flag(self, tmp_dir):
+        """Launchd plist must use --foreground so process doesn't fork."""
+        plist = daemon._build_plist(tmp_dir)
+        assert "--foreground" in plist["ProgramArguments"]
 
 
 # =========================================================================
-# run_install
+# _build_systemd_unit
 # =========================================================================
 
 
-class TestRunInstall:
-    def test_writes_plist_and_loads(self, tmp_dir, tmp_path):
-        plist_path = tmp_path / "test.plist"
+class TestBuildSystemdUnit:
+    def test_basic_unit(self, tmp_dir):
+        import sys
 
+        unit = daemon._build_systemd_unit(tmp_dir)
+
+        assert "[Unit]" in unit
+        assert "[Service]" in unit
+        assert "[Install]" in unit
+        assert "Type=simple" in unit
+        assert "--foreground" in unit
+        assert sys.executable in unit
+        assert str(tmp_dir.resolve()) in unit
+
+    def test_unit_with_only(self, tmp_dir):
+        unit = daemon._build_systemd_unit(tmp_dir, only="openvpn")
+
+        assert "--only openvpn" in unit
+
+    def test_unit_restart_on_failure(self, tmp_dir):
+        unit = daemon._build_systemd_unit(tmp_dir)
+
+        assert "Restart=on-failure" in unit
+        assert "RestartSec=10" in unit
+
+    def test_unit_after_network(self, tmp_dir):
+        unit = daemon._build_systemd_unit(tmp_dir)
+
+        assert "After=network-online.target" in unit
+
+
+# =========================================================================
+# enable / disable
+# =========================================================================
+
+
+class TestEnable:
+    def test_enable_macos(self, tmp_dir, tmp_path):
+        plist_path = tmp_path / "test.plist"
         mock_load = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="", stderr=""
         )
         with (
+            patch("tv.daemon.platform.system", return_value="Darwin"),
             patch.object(daemon, "PLIST_PATH", plist_path),
             patch("tv.daemon.subprocess.run", return_value=mock_load),
         ):
-            daemon.run_install(tmp_dir)
+            daemon.enable(tmp_dir)
 
         assert plist_path.exists()
-        # Verify it's valid plist
         data = plistlib.loads(plist_path.read_bytes())
         assert data["Label"] == "com.tunnelvault.keepalive"
-        assert data["Label"] == "com.tunnelvault.keepalive"
 
-    def test_unloads_existing_before_install(self, tmp_dir, tmp_path):
-        plist_path = tmp_path / "test.plist"
-        plist_path.write_text("")  # already exists
-
-        calls = []
-
-        def track_calls(cmd, **kwargs):
-            calls.append(cmd)
-            return subprocess.CompletedProcess(
-                args=cmd, returncode=0, stdout="", stderr=""
-            )
-
-        with (
-            patch.object(daemon, "PLIST_PATH", plist_path),
-            patch("tv.daemon.subprocess.run", side_effect=track_calls),
-        ):
-            daemon.run_install(tmp_dir)
-
-        # First call should be unload, second should be load
-        assert "unload" in calls[0]
-        assert "load" in calls[1]
-
-    def test_passes_only_to_plist(self, tmp_dir, tmp_path):
-        plist_path = tmp_path / "test.plist"
-
-        mock_load = subprocess.CompletedProcess(
+    def test_enable_linux(self, tmp_dir, tmp_path):
+        unit_path = tmp_path / "test.service"
+        mock_result = subprocess.CompletedProcess(
             args=[], returncode=0, stdout="", stderr=""
         )
         with (
-            patch.object(daemon, "PLIST_PATH", plist_path),
-            patch("tv.daemon.subprocess.run", return_value=mock_load),
+            patch("tv.daemon.platform.system", return_value="Linux"),
+            patch.object(daemon, "SYSTEMD_PATH", unit_path),
+            patch("tv.daemon.subprocess.run", return_value=mock_result),
         ):
-            daemon.run_install(tmp_dir, only="fortivpn")
+            daemon.enable(tmp_dir)
 
-        data = plistlib.loads(plist_path.read_bytes())
-        args = data["ProgramArguments"]
-        assert "--only" in args
-        assert "fortivpn" in args
-
-
-# =========================================================================
-# run_uninstall
-# =========================================================================
+        assert unit_path.exists()
+        content = unit_path.read_text()
+        assert "--foreground" in content
 
 
-class TestRunUninstall:
-    def test_unloads_and_removes(self, tmp_path):
+class TestDisable:
+    def test_disable_macos(self, tmp_path):
         plist_path = tmp_path / "test.plist"
         plist_path.write_text("")
 
         mock_result = subprocess.CompletedProcess(args=[], returncode=0)
         with (
+            patch("tv.daemon.platform.system", return_value="Darwin"),
             patch.object(daemon, "PLIST_PATH", plist_path),
             patch("tv.daemon.subprocess.run", return_value=mock_result),
         ):
-            daemon.run_uninstall()
+            daemon.disable()
 
         assert not plist_path.exists()
 
-    def test_not_installed_noop(self, tmp_path, capsys):
-        plist_path = tmp_path / "nonexistent.plist"
+    def test_disable_linux(self, tmp_path):
+        unit_path = tmp_path / "test.service"
+        unit_path.write_text("")
 
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0)
         with (
-            patch.object(daemon, "PLIST_PATH", plist_path),
+            patch("tv.daemon.platform.system", return_value="Linux"),
+            patch.object(daemon, "SYSTEMD_PATH", unit_path),
+            patch("tv.daemon.subprocess.run", return_value=mock_result),
+        ):
+            daemon.disable()
+
+        assert not unit_path.exists()
+
+    def test_disable_not_configured(self, tmp_path, capsys):
+        with (
+            patch("tv.daemon.platform.system", return_value="Darwin"),
+            patch.object(daemon, "PLIST_PATH", tmp_path / "nope.plist"),
             patch("tv.daemon.subprocess.run") as mock_run,
         ):
-            daemon.run_uninstall()
+            daemon.disable()
 
         mock_run.assert_not_called()
         out = capsys.readouterr().out
-        assert "not installed" in out.lower() or "не установлен" in out.lower()
+        assert "not configured" in out.lower() or "не настроен" in out.lower()
 
 
-# =========================================================================
-# run_status
-# =========================================================================
-
-
-class TestRunStatus:
-    def test_prints_not_installed(self, tmp_path, capsys):
-        with patch.object(daemon, "PLIST_PATH", tmp_path / "nope.plist"):
-            daemon.run_status()
-
-        out = capsys.readouterr().out
-        assert "com.tunnelvault.keepalive" in out
-
-    def test_prints_running(self, tmp_path, capsys):
-        plist_path = tmp_path / "test.plist"
-        plist_path.write_text("")
-
-        launchctl_output = "PID\tStatus\tLabel\n12345\t0\tcom.tunnelvault.keepalive\n"
-        mock_result = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout=launchctl_output
-        )
-        with (
-            patch.object(daemon, "PLIST_PATH", plist_path),
-            patch("tv.daemon.subprocess.run", return_value=mock_result),
-        ):
-            daemon.run_status()
-
-        out = capsys.readouterr().out
-        assert "12345" in out

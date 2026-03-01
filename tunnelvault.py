@@ -56,7 +56,8 @@ def main() -> None:
         args.validate,
         args.logs is not None,
         args.watch,
-        args.daemon is not None,
+        args.enable,
+        args.disable,
     ]
     if sum(bool(x) for x in exclusive) > 1:
         ui.fail(t("main.one_command"))
@@ -78,23 +79,19 @@ def main() -> None:
         watch.run(exact_names=exact_names, prefix_names=prefix_names, show_all=show_all)
         return
 
-    if args.daemon:
+    if args.enable or args.disable:
         from tv import daemon
 
         if IS_WINDOWS:
-            ui.fail("Daemon mode is not supported on Windows yet")
+            ui.fail("Autostart is not supported on Windows yet")
             sys.exit(1)
 
-        if args.daemon == "status":
-            daemon.run_status()
-            return
-        # install/uninstall need root
         if not _is_admin():
             ui.warn(t("main.needs_sudo"))
-        if args.daemon == "install":
-            daemon.run_install(script_dir, only=args.only)
-        elif args.daemon == "uninstall":
-            daemon.run_uninstall()
+        if args.enable:
+            daemon.enable(script_dir, only=args.only)
+        else:
+            daemon.disable()
         return
 
     # --- Commands that need root ---
@@ -126,6 +123,26 @@ def main() -> None:
         sys.exit(0 if validate_mod.run(defs, script_dir) else 1)
 
     if args.disconnect:
+        # If a daemon is running, send SIGTERM and let it clean up
+        if not IS_WINDOWS:
+            from tv import daemon as daemon_mod
+
+            daemon_pid = daemon_mod.read_pid(script_dir)
+            if daemon_pid and daemon_mod.is_pid_alive(daemon_pid):
+                os.kill(daemon_pid, signal.SIGTERM)
+                ui.ok(t("main.daemon_stopped", pid=daemon_pid))
+                # Wait for daemon to finish cleanup
+                for _ in range(30):
+                    if not daemon_mod.is_pid_alive(daemon_pid):
+                        break
+                    time.sleep(0.5)
+                daemon_mod.remove_pid(script_dir)
+                return
+            elif daemon_pid:
+                ui.warn(t("main.stale_pidfile", pid=daemon_pid))
+                daemon_mod.remove_pid(script_dir)
+                # Fall through to emergency cleanup
+
         tunnels = defaults_mod.parse_tunnels(defs)
         try:
             if args.only:
@@ -176,6 +193,8 @@ def main() -> None:
         )
         engine.log.log("WARN", f"Interrupted by {name}")
         print(f"  {ui.DIM}{t('main.cleaning_vpn')}{ui.NC}", file=sys.stderr)
+        # Wait for any ongoing reconnect to finish before cleanup
+        _reconnect_lock.acquire(timeout=30)
         try:
             engine.disconnect_all()
         except Exception:
@@ -184,6 +203,15 @@ def main() -> None:
                 disconnect.run(engine.net, engine.log, defs, script_dir=script_dir)
             except Exception as exc:
                 print(f"  {ui.DIM}cleanup error: {exc}{ui.NC}", file=sys.stderr)
+        finally:
+            if _reconnect_lock.locked():
+                _reconnect_lock.release()
+        # Remove PID file if we're the daemon
+        try:
+            from tv import daemon as daemon_mod
+            daemon_mod.remove_pid(script_dir)
+        except Exception:
+            pass
         print(
             f"  {ui.DIM}{t('main.log_colon', path=engine.log.log_path)}{ui.NC}",
             file=sys.stderr,
@@ -193,6 +221,10 @@ def main() -> None:
     signal.signal(signal.SIGINT, on_signal)
     if not IS_WINDOWS:
         signal.signal(signal.SIGTERM, on_signal)
+
+    # --- Reconnect lock (protects against signal during reconnect) ---
+    import threading
+    _reconnect_lock = threading.Lock()
 
     # --- Start ---
     settings_path = script_dir / cfg.paths.settings_file
@@ -242,16 +274,57 @@ def main() -> None:
             engine.log.log("INFO", f"{tcfg.name}: ok={r.ok}")
         engine.log.log("INFO", f"Log: {engine.log.log_path}")
 
-    # --- Keepalive (default, unless --no-daemon) ---
-    if not args.no_daemon:
-        _keepalive_loop(engine)
+    # --- Keepalive / daemon mode ---
+    if args.no_daemon:
+        return
+
+    from tv import daemon as daemon_mod
+
+    if args.foreground or IS_WINDOWS:
+        # Stay in foreground (for launchd/systemd or Windows)
+        daemon_mod.write_pid(script_dir)
+        try:
+            _keepalive_loop(engine, reconnect_lock=_reconnect_lock)
+        finally:
+            daemon_mod.remove_pid(script_dir)
+        return
+
+    # Default: fork into background
+    child_pid = daemon_mod.daemonize(script_dir)
+    if child_pid > 0:
+        # Parent: print info and exit
+        log_path = daemon_mod._daemon_log_path(script_dir)
+        ui.ok(t("main.backgrounded", pid=child_pid))
+        ui.info(f"  {ui.DIM}{t('main.daemon_log_hint', path=log_path)}{ui.NC}")
+        sys.exit(0)
+
+    # --- Child (daemon) ---
+    # Fresh lock - threading primitives don't survive fork reliably
+    _reconnect_lock = threading.Lock()
+
+    # Re-register signal handlers (fork resets them in some cases)
+    signal.signal(signal.SIGINT, on_signal)
+    signal.signal(signal.SIGTERM, on_signal)
+
+    # Restart DNS proxy thread (socket survives fork, thread does not)
+    if engine._dns_proxy is not None:
+        engine._dns_proxy.restart_thread()
+
+    engine.log.log("INFO", f"Daemonized (PID={os.getpid()})")
+
+    try:
+        _keepalive_loop(engine, reconnect_lock=_reconnect_lock)
+    finally:
+        daemon_mod.remove_pid(script_dir)
 
 
-# VPN type -> interface prefixes for dynamic matching
+# VPN type -> interface prefixes for dynamic matching.
+# On Windows, adapters have arbitrary names (e.g. "Ethernet 2", "TAP-Windows Adapter V9"),
+# so prefix matching is not useful; watch uses saved state (exact match) instead.
 _TYPE_PREFIXES: dict[str, list[str]] = {
     "fortivpn": ["ppp"],
-    "openvpn": ["tun", "utun"],
-    "singbox": ["utun"],
+    "openvpn": ["tun", "utun"] if not IS_WINDOWS else [],
+    "singbox": ["utun"] if not IS_WINDOWS else [],
 }
 
 
@@ -420,7 +493,7 @@ def _log_summary(engine: Engine, check_results: list, ext_ip: str) -> None:
     )
 
 
-def _keepalive_loop(engine: Engine) -> None:
+def _keepalive_loop(engine: Engine, reconnect_lock=None) -> None:
     """Monitor VPN processes, reconnect when dead (e.g. after macOS sleep)."""
     interval = cfg.timeouts.keepalive_interval
     ui.info(f"🔄 {t('main.keepalive_started', interval=interval)}")
@@ -471,6 +544,10 @@ def _keepalive_loop(engine: Engine) -> None:
             f"\n  {ui.YELLOW}🔄 {t('main.keepalive_reconnecting', reason=reason_display)}{ui.NC}"
         )
 
+        # Hold lock during reconnect to prevent signal handler from
+        # calling disconnect_all() concurrently
+        if reconnect_lock:
+            reconnect_lock.acquire()
         try:
             check_results, ext_ip = engine.reconnect_all(quiet=True)
             reconnect_count += 1
@@ -478,6 +555,9 @@ def _keepalive_loop(engine: Engine) -> None:
             engine.log.log("ERROR", f"Keepalive reconnect failed: {e}")
             ui.fail(t("main.keepalive_failed", error=str(e)))
             continue
+        finally:
+            if reconnect_lock and reconnect_lock.locked():
+                reconnect_lock.release()
 
         ok_count = sum(1 for r in engine.results if r.ok)
         total = len(engine.results)

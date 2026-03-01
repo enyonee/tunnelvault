@@ -45,7 +45,7 @@ class BypassDNSProxy:
 
         self._sock: Optional[socket.socket] = None
         self._thread: Optional[threading.Thread] = None
-        self._running = False
+        self._stop_event = threading.Event()
         self._injected: set[str] = set()
         self._lock = threading.Lock()
 
@@ -56,7 +56,7 @@ class BypassDNSProxy:
         self._sock.settimeout(1.0)
         self._sock.bind((self._bind, self._port))
 
-        self._running = True
+        self._stop_event.clear()
         self._thread = threading.Thread(
             target=self._serve, name="dns-bypass-proxy", daemon=True,
         )
@@ -65,7 +65,7 @@ class BypassDNSProxy:
 
     def stop(self) -> None:
         """Signal shutdown, close socket, wait for thread."""
-        self._running = False
+        self._stop_event.set()
         if self._sock:
             try:
                 self._sock.close()
@@ -76,6 +76,20 @@ class BypassDNSProxy:
             self._thread.join(timeout=3.0)
             self._thread = None
         self._log.log("INFO", "DNS bypass proxy stopped")
+
+    def restart_thread(self) -> None:
+        """Restart serving thread on existing socket (e.g. after fork).
+
+        The socket survives fork but the thread does not.
+        """
+        if self._sock is None:
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._serve, name="dns-bypass-proxy", daemon=True,
+        )
+        self._thread.start()
+        self._log.log("INFO", "DNS bypass proxy thread restarted (post-fork)")
 
     def injected_routes(self) -> set[str]:
         """Return copy of all IPs that got host routes injected."""
@@ -93,13 +107,13 @@ class BypassDNSProxy:
 
     def _serve(self) -> None:
         """Main recv loop - runs in daemon thread."""
-        while self._running:
+        while not self._stop_event.is_set():
             try:
                 data, addr = self._sock.recvfrom(_DNS_BUF_SIZE)
             except socket.timeout:
                 continue
             except OSError:
-                if not self._running:
+                if self._stop_event.is_set():
                     break
                 continue
 
@@ -131,7 +145,7 @@ class BypassDNSProxy:
 
         # Send reply back to client
         sock = self._sock
-        if sock and self._running:
+        if sock and not self._stop_event.is_set():
             try:
                 sock.sendto(reply_data, addr)
             except OSError:

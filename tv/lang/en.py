@@ -50,6 +50,11 @@ STRINGS: dict[str, str] = {
     "main.keepalive_reason_dead": "dead process",
     "main.keepalive_reconnected": "Reconnected {ok}/{total}: {names}",
     "main.keepalive_failed": "Reconnect failed: {error}",
+    "main.backgrounded": "Service started (PID={pid}), terminal released",
+    "main.daemon_log_hint": "Log: tail -f {path}",
+    "main.daemon_stopped": "Daemon stopped (PID={pid})",
+    "main.no_pidfile": "No running daemon found (PID file missing)",
+    "main.stale_pidfile": "Stale PID file (process {pid} not running), cleaning up",
 
     # --- config.py ---
     "config.settings_loaded": "Settings: loaded",
@@ -179,6 +184,7 @@ STRINGS: dict[str, str] = {
     "vpn.forti.connected": "FortiVPN connected ({iface})",
     "vpn.forti.no_gw_fallback": "Could not determine PPP gateway, using fallback: {gw}",
     "vpn.forti.no_gw": "Could not determine PPP gateway, routes may not work",
+    "vpn.forti.unsupported_windows": "openfortivpn is not available on Windows",
 
     # --- vpn/singbox.py ---
     "vpn.sb.not_connected": "sing-box did not start within {timeout}s",
@@ -199,16 +205,12 @@ STRINGS: dict[str, str] = {
     "param.fallback_gw": "Fallback GW",
 
     # --- daemon.py ---
-    "daemon.installed": "Daemon installed and loaded",
-    "daemon.install_failed": "Daemon install failed: {error}",
-    "daemon.uninstalled": "Daemon unloaded and removed",
-    "daemon.not_installed": "Daemon not installed",
-    "daemon.label": "Service",
-    "daemon.status_label": "Status",
-    "daemon.plist_label": "Plist",
-    "daemon.running": "running",
-    "daemon.stopped": "stopped",
     "daemon.log_hint": "Log: tail -f {path}",
+    "daemon.enabled": "Autostart enabled",
+    "daemon.enable_failed": "Autostart enable failed: {error}",
+    "daemon.disabled": "Autostart disabled",
+    "daemon.already_disabled": "Autostart not configured",
+    "daemon.systemd_unit_written": "Systemd unit written: {path}",
 
     # --- routing.py ---
     "routing.wildcard_no_dot": "*.{domain} - domain must contain a dot (*.example.local)",
@@ -238,5 +240,7 @@ STRINGS: dict[str, str] = {
     "cli.watch": "Real-time VPN traffic monitoring",
     "cli.all": "Show all VPN interfaces (including system)",
     "cli.no_daemon": "Exit after connect (don't stay running)",
-    "cli.daemon": "Daemon: install/uninstall/status (launchd keepalive service)",
+    "cli.foreground": "Stay in foreground (for launchd/systemd)",
+    "cli.enable": "Enable autostart (launchd/systemd)",
+    "cli.disable": "Disable autostart",
 }

@@ -52,6 +52,7 @@ class Paths:
     settings_file: str = ".vpn-settings.json"
     defaults_file: str = "defaults.toml"
     main_log: str = "tunnelvault.log"
+    pid_file: str = "tunnelvault.pid"
     resolver_dir: str = "/etc/resolver"
 
     def __post_init__(self):
