@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -336,7 +335,6 @@ class TestSetup:
         assert log_path.exists()
         assert log_path.read_bytes() == b""
         # File should be readable (0o644)
-        import stat
         mode = log_path.stat().st_mode & 0o777
         assert mode & 0o444 == 0o444  # readable by all
 

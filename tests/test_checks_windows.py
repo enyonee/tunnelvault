@@ -5,7 +5,6 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import patch, MagicMock
 
-import pytest
 
 from tv.checks import (
     _check_port,
@@ -14,7 +13,6 @@ from tv.checks import (
     _check_http_any,
     get_external_ip,
     _ping_hint,
-    _urllib_get,
 )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import platform
 import plistlib
@@ -19,6 +20,9 @@ PLIST_PATH = Path(f"/Library/LaunchDaemons/{PLIST_LABEL}.plist")
 SYSTEMD_UNIT = "tunnelvault.service"
 SYSTEMD_PATH = Path(f"/etc/systemd/system/{SYSTEMD_UNIT}")
 
+# Module-level fd for PID file lock (kept open while daemon is alive)
+_pid_fd: int | None = None
+
 
 # =========================================================================
 # PID file
@@ -34,10 +38,31 @@ def pid_file_path(script_dir: Path) -> Path:
 
 
 def write_pid(script_dir: Path, pid: int | None = None) -> Path:
-    """Write current (or given) PID to file. Returns path."""
+    """Write current (or given) PID to file with flock. Returns path.
+
+    The file descriptor is kept open (module-level _pid_fd) so the lock
+    persists for the lifetime of the process.
+    """
+    global _pid_fd
     path = pid_file_path(script_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(str(pid or os.getpid()))
+
+    actual_pid = os.getpid() if pid is None else pid
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        raise
+    os.write(fd, str(actual_pid).encode())
+
+    # Close previous fd if any
+    if _pid_fd is not None:
+        try:
+            os.close(_pid_fd)
+        except OSError:
+            pass
+    _pid_fd = fd
     return path
 
 
@@ -51,7 +76,15 @@ def read_pid(script_dir: Path) -> int | None:
 
 
 def remove_pid(script_dir: Path) -> None:
-    """Remove PID file if it exists."""
+    """Remove PID file and release lock."""
+    global _pid_fd
+    if _pid_fd is not None:
+        try:
+            fcntl.flock(_pid_fd, fcntl.LOCK_UN)
+            os.close(_pid_fd)
+        except OSError:
+            pass
+        _pid_fd = None
     pid_file_path(script_dir).unlink(missing_ok=True)
 
 
@@ -64,29 +97,99 @@ def is_pid_alive(pid: int) -> bool:
         return False
 
 
+def is_pid_file_locked(script_dir: Path) -> bool:
+    """Check if PID file is locked by another process (daemon alive)."""
+    path = pid_file_path(script_dir)
+    if not path.exists():
+        return False
+    try:
+        fd = os.open(str(path), os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Got the lock -> no one holds it -> daemon is dead
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        except OSError:
+            # Can't get lock -> daemon holds it -> alive
+            return True
+        finally:
+            os.close(fd)
+    except OSError:
+        return False
+
+
+def is_tunnelvault_process(pid: int) -> bool:
+    """Verify that PID belongs to a tunnelvault process."""
+    try:
+        system = platform.system()
+        if system == "Linux":
+            cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().decode(errors="replace")
+            return "tunnelvault" in cmdline
+        else:
+            r = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "command="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            return "tunnelvault" in r.stdout
+    except Exception:
+        return False
+
+
 # =========================================================================
-# Daemonize (fork + setsid)
+# Daemonize (double fork + setsid)
 # =========================================================================
 
 
 def daemonize(script_dir: Path) -> int:
-    """Fork into background. Returns child PID to parent, 0 to child.
+    """Double-fork into background. Returns child PID to parent, 0 to grandchild.
 
     Parent should print PID and sys.exit(0).
-    Child: setsid, redirect stdio to daemon.log, write PID file.
-    """
-    child_pid = os.fork()
-    if child_pid > 0:
-        # Parent: return child PID
-        return child_pid
+    Grandchild: setsid, second fork, redirect stdio to daemon.log, write PID file.
 
-    # --- Child process ---
+    Uses a pipe to synchronize: grandchild writes its PID to the pipe after
+    writing the PID file, so the parent always gets the correct PID.
+    """
+    # Create pipe for grandchild -> parent PID communication
+    pipe_r, pipe_w = os.pipe()
+
+    # First fork - detach from terminal
+    first_pid = os.fork()
+    if first_pid > 0:
+        # Parent: close write end, read grandchild PID from pipe
+        os.close(pipe_w)
+        _, status = os.waitpid(first_pid, 0)
+        try:
+            data = b""
+            while True:
+                chunk = os.read(pipe_r, 64)
+                if not chunk:
+                    break
+                data += chunk
+            grandchild_pid = int(data.strip()) if data.strip() else None
+        except (ValueError, OSError):
+            grandchild_pid = None
+        finally:
+            os.close(pipe_r)
+        return grandchild_pid or first_pid
+
+    # --- Intermediate child ---
+    os.close(pipe_r)  # close read end in child
     os.setsid()
 
-    # Redirect stdio to daemon.log (use raw fd numbers: 0=stdin, 1=stdout, 2=stderr)
-    log_path = _daemon_log_path(script_dir)
+    # Second fork - prevent acquiring controlling terminal
+    second_pid = os.fork()
+    if second_pid > 0:
+        # Intermediate child: close pipe write end and exit
+        os.close(pipe_w)
+        os._exit(0)
+
+    # --- Grandchild (actual daemon) ---
+    # Redirect stdio to daemon.log
+    log_path = daemon_log_path(script_dir)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+    fd = os.open(str(log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     os.dup2(fd, 1)  # stdout
     os.dup2(fd, 2)  # stderr
     os.close(fd)
@@ -95,8 +198,16 @@ def daemonize(script_dir: Path) -> int:
     os.dup2(devnull, 0)  # stdin
     os.close(devnull)
 
-    # Write PID file
+    # Write PID file (with flock)
     write_pid(script_dir)
+
+    # Signal parent with our PID via pipe
+    try:
+        os.write(pipe_w, str(os.getpid()).encode())
+    except OSError:
+        pass
+    finally:
+        os.close(pipe_w)
 
     return 0
 
@@ -118,8 +229,15 @@ def enable(script_dir: Path, *, only: str | None = None) -> None:
         sys.exit(1)
 
 
-def disable() -> None:
-    """Disable autostart for current platform."""
+def disable(script_dir: Path | None = None) -> None:
+    """Disable autostart for current platform.
+
+    If script_dir is provided, also stops a running daemon.
+    """
+    # Stop running daemon first
+    if script_dir is not None:
+        _stop_running_daemon(script_dir)
+
     system = platform.system()
     if system == "Darwin":
         _disable_launchd()
@@ -128,6 +246,30 @@ def disable() -> None:
     else:
         ui.fail(f"Autostart not supported on {system}")
         sys.exit(1)
+
+
+def _stop_running_daemon(script_dir: Path) -> None:
+    """Stop a running daemon if PID file exists."""
+    import signal
+    import time
+
+    daemon_pid = read_pid(script_dir)
+    if not daemon_pid or not is_pid_alive(daemon_pid):
+        return
+
+    if not is_tunnelvault_process(daemon_pid):
+        ui.warn(f"PID {daemon_pid} is not a tunnelvault process, skipping")
+        remove_pid(script_dir)
+        return
+
+    os.kill(daemon_pid, signal.SIGTERM)
+    for _ in range(30):
+        if not is_pid_alive(daemon_pid):
+            break
+        time.sleep(0.5)
+    else:
+        os.kill(daemon_pid, signal.SIGKILL)
+    remove_pid(script_dir)
 
 
 # =========================================================================
@@ -154,7 +296,7 @@ def _enable_launchd(script_dir: Path, *, only: str | None = None) -> None:
     if r.returncode == 0:
         ui.ok(t("daemon.enabled"))
         ui.info(f"  {ui.DIM}{PLIST_PATH}{ui.NC}")
-        log_path = _daemon_log_path(script_dir)
+        log_path = daemon_log_path(script_dir)
         ui.info(f"  {ui.DIM}{t('daemon.log_hint', path=log_path)}{ui.NC}")
     else:
         ui.fail(t("daemon.enable_failed", error=r.stderr.strip()))
@@ -213,12 +355,18 @@ def _disable_systemd() -> None:
 
 
 def _build_systemd_unit(script_dir: Path, *, only: str | None = None) -> str:
-    """Build systemd unit file content."""
+    """Build systemd unit file content with hardening directives."""
     script = str((script_dir / "tunnelvault.py").resolve())
     python = sys.executable
     args = f"{python} {script} --foreground"
     if only:
         args += f" --only {only}"
+
+    # Resolve log_dir for ReadWritePaths
+    log_dir = Path(cfg.paths.log_dir)
+    if not log_dir.is_absolute():
+        log_dir = script_dir / log_dir
+    log_dir_resolved = str(log_dir.resolve())
 
     return f"""\
 [Unit]
@@ -232,6 +380,11 @@ ExecStart={args}
 Restart=on-failure
 RestartSec=10
 WorkingDirectory={script_dir.resolve()}
+ProtectSystem=strict
+ProtectHome=read-only
+NoNewPrivileges=yes
+ReadWritePaths=/etc/resolv.conf /etc/resolver /var/log {log_dir_resolved}
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
@@ -239,11 +392,12 @@ WantedBy=multi-user.target
 
 
 # =========================================================================
-# Internal
+# Public helpers
 # =========================================================================
 
 
-def _daemon_log_path(script_dir: Path) -> Path:
+def daemon_log_path(script_dir: Path) -> Path:
+    """Path to daemon.log file."""
     log_dir = Path(cfg.paths.log_dir)
     if not log_dir.is_absolute():
         log_dir = script_dir / log_dir

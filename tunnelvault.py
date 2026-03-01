@@ -80,18 +80,18 @@ def main() -> None:
         return
 
     if args.enable or args.disable:
-        from tv import daemon
-
         if IS_WINDOWS:
             ui.fail("Autostart is not supported on Windows yet")
             sys.exit(1)
+
+        from tv import daemon
 
         if not _is_admin():
             ui.warn(t("main.needs_sudo"))
         if args.enable:
             daemon.enable(script_dir, only=args.only)
         else:
-            daemon.disable()
+            daemon.disable(script_dir)
         return
 
     # --- Commands that need root ---
@@ -129,15 +129,32 @@ def main() -> None:
 
             daemon_pid = daemon_mod.read_pid(script_dir)
             if daemon_pid and daemon_mod.is_pid_alive(daemon_pid):
-                os.kill(daemon_pid, signal.SIGTERM)
-                ui.ok(t("main.daemon_stopped", pid=daemon_pid))
-                # Wait for daemon to finish cleanup
-                for _ in range(30):
-                    if not daemon_mod.is_pid_alive(daemon_pid):
-                        break
-                    time.sleep(0.5)
-                daemon_mod.remove_pid(script_dir)
-                return
+                # Verify PID belongs to tunnelvault before killing
+                if not daemon_mod.is_tunnelvault_process(daemon_pid):
+                    ui.warn(f"PID {daemon_pid} is not a tunnelvault process")
+                    daemon_mod.remove_pid(script_dir)
+                    # Fall through to emergency cleanup
+                else:
+                    os.kill(daemon_pid, signal.SIGTERM)
+                    ui.info(f"  Stopping daemon (PID={daemon_pid})...")
+                    # Wait for daemon to finish cleanup
+                    sigkilled = False
+                    for i in range(30):
+                        if not daemon_mod.is_pid_alive(daemon_pid):
+                            break
+                        time.sleep(0.5)
+                    else:
+                        # SIGKILL fallback after 15s
+                        ui.warn("  Daemon not responding, sending SIGKILL...")
+                        os.kill(daemon_pid, signal.SIGKILL)
+                        time.sleep(0.5)
+                        sigkilled = True
+                    daemon_mod.remove_pid(script_dir)
+                    ui.ok(t("main.daemon_stopped", pid=daemon_pid))
+                    if not sigkilled:
+                        # Daemon handled SIGTERM and cleaned up VPN state
+                        return
+                    # SIGKILL: daemon didn't clean up - fall through to emergency cleanup
             elif daemon_pid:
                 ui.warn(t("main.stale_pidfile", pid=daemon_pid))
                 daemon_mod.remove_pid(script_dir)
@@ -177,6 +194,10 @@ def main() -> None:
     # --- Engine (connect) ---
     engine = Engine(script_dir, defs, debug=args.debug)
     _log = engine.log
+
+    # --- Reconnect lock (protects against signal during reconnect) ---
+    import threading
+    _reconnect_lock = threading.Lock()
 
     # --- Signal handlers ---
     _handling_signal = False
@@ -221,10 +242,6 @@ def main() -> None:
     signal.signal(signal.SIGINT, on_signal)
     if not IS_WINDOWS:
         signal.signal(signal.SIGTERM, on_signal)
-
-    # --- Reconnect lock (protects against signal during reconnect) ---
-    import threading
-    _reconnect_lock = threading.Lock()
 
     # --- Start ---
     settings_path = script_dir / cfg.paths.settings_file
@@ -289,16 +306,16 @@ def main() -> None:
             daemon_mod.remove_pid(script_dir)
         return
 
-    # Default: fork into background
+    # Default: double-fork into background
     child_pid = daemon_mod.daemonize(script_dir)
     if child_pid > 0:
         # Parent: print info and exit
-        log_path = daemon_mod._daemon_log_path(script_dir)
+        log_path = daemon_mod.daemon_log_path(script_dir)
         ui.ok(t("main.backgrounded", pid=child_pid))
         ui.info(f"  {ui.DIM}{t('main.daemon_log_hint', path=log_path)}{ui.NC}")
         sys.exit(0)
 
-    # --- Child (daemon) ---
+    # --- Daemon (grandchild) ---
     # Fresh lock - threading primitives don't survive fork reliably
     _reconnect_lock = threading.Lock()
 
@@ -307,8 +324,7 @@ def main() -> None:
     signal.signal(signal.SIGTERM, on_signal)
 
     # Restart DNS proxy thread (socket survives fork, thread does not)
-    if engine._dns_proxy is not None:
-        engine._dns_proxy.restart_thread()
+    engine.restart_dns_proxy_thread()
 
     engine.log.log("INFO", f"Daemonized (PID={os.getpid()})")
 

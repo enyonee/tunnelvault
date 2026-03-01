@@ -266,6 +266,11 @@ class Engine:
         except OSError:
             pass
 
+    def restart_dns_proxy_thread(self) -> None:
+        """Restart DNS proxy thread after fork (socket survives, thread does not)."""
+        if self._dns_proxy is not None:
+            self._dns_proxy.restart_thread()
+
     def check_alive(self) -> list[tuple[TunnelConfig, int | None]]:
         """Return list of (tunnel_config, dead_pid) for tunnels with dead processes."""
         dead: list[tuple[TunnelConfig, int | None]] = []

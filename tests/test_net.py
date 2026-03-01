@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import socket
 import subprocess
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 import pytest
 
-from tv.net import DarwinNet, LinuxNet, create, NetManager, _run
+from tv.net import DarwinNet, LinuxNet, create, _run
 
 
 @pytest.fixture

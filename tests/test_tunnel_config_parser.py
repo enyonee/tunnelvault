@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import pytest
 
 from tv.defaults import parse_tunnels
-from tv.vpn.base import TunnelConfig
 
 
 # ---------------------------------------------------------------------------

@@ -6,7 +6,6 @@ import ipaddress
 from pathlib import Path
 
 from tv import ui, routing
-from tv import defaults as defaults_mod
 from tv.disconnect import get_vpn_server_routes
 from tv.i18n import t
 from tv.vpn.registry import available_types, get_plugin

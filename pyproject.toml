@@ -12,3 +12,10 @@ dependencies = [
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-n auto"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "pytest-xdist>=3.8.0",
+    "ruff>=0.15.4",
+]

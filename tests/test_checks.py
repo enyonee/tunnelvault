@@ -12,10 +12,8 @@ from tv.checks import (
     _check_ping,
     _check_dns,
     _check_http,
-    _check_http_any,
     get_external_ip,
     _run_one,
-    CheckResult,
 )
 
 

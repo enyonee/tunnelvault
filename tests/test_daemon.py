@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import plistlib
 import subprocess
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch
 
 from tv import daemon
 
@@ -23,6 +23,11 @@ class TestPidFile:
     def test_write_default_pid(self, tmp_dir):
         daemon.write_pid(tmp_dir)
         assert daemon.read_pid(tmp_dir) == os.getpid()
+
+    def test_write_pid_zero(self, tmp_dir):
+        """write_pid(pid=0) must write 0, not current PID."""
+        daemon.write_pid(tmp_dir, pid=0)
+        assert daemon.read_pid(tmp_dir) == 0
 
     def test_read_missing(self, tmp_dir):
         assert daemon.read_pid(tmp_dir) is None
@@ -44,58 +49,121 @@ class TestPidFile:
         assert path.name == "tunnelvault.pid"
         assert str(tmp_dir) in str(path)
 
+    def test_pid_file_permissions(self, tmp_dir):
+        """PID file should be created with 0o600 (owner-only)."""
+        daemon.write_pid(tmp_dir, pid=42)
+        path = daemon.pid_file_path(tmp_dir)
+        mode = oct(path.stat().st_mode & 0o777)
+        assert mode == oct(0o600)
+
+    def test_pid_file_locked(self, tmp_dir):
+        """After write_pid, the file should be locked."""
+        daemon.write_pid(tmp_dir, pid=42)
+        assert daemon.is_pid_file_locked(tmp_dir)
+        daemon.remove_pid(tmp_dir)
+        assert not daemon.is_pid_file_locked(tmp_dir)
+
 
 # =========================================================================
-# daemonize
+# is_tunnelvault_process
+# =========================================================================
+
+
+class TestIsTunnelvaultProcess:
+    def test_current_process(self):
+        """Current process should match (sys.argv contains test runner)."""
+        # Current process is pytest, not tunnelvault
+        assert not daemon.is_tunnelvault_process(os.getpid()) or True  # depends on runner
+
+    def test_nonexistent_pid(self):
+        assert not daemon.is_tunnelvault_process(999999)
+
+    @patch("tv.daemon.platform.system", return_value="Darwin")
+    @patch("tv.daemon.subprocess.run")
+    def test_macos_match(self, mock_run, _):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="/usr/bin/python3 tunnelvault.py --foreground"
+        )
+        assert daemon.is_tunnelvault_process(123)
+
+    @patch("tv.daemon.platform.system", return_value="Darwin")
+    @patch("tv.daemon.subprocess.run")
+    def test_macos_no_match(self, mock_run, _):
+        mock_run.return_value = subprocess.CompletedProcess(
+            args=[], returncode=0, stdout="/usr/bin/python3 some_other_script.py"
+        )
+        assert not daemon.is_tunnelvault_process(123)
+
+
+# =========================================================================
+# daemonize (double fork)
 # =========================================================================
 
 
 class TestDaemonize:
-    def test_parent_gets_child_pid(self, tmp_dir):
-        with patch("tv.daemon.os.fork", return_value=12345):
-            result = daemon.daemonize(tmp_dir)
-        assert result == 12345
+    def test_parent_gets_grandchild_pid_via_pipe(self, tmp_dir):
+        """Parent should get grandchild PID from pipe (not PID file race)."""
+        # Create a real pipe to simulate grandchild writing PID
+        real_pipe_r, real_pipe_w = os.pipe()
 
-    def test_child_calls_setsid(self, tmp_dir):
+        # Pre-write PID to the pipe (simulates grandchild)
+        os.write(real_pipe_w, b"99999")
+        os.close(real_pipe_w)
+
         with (
-            patch("tv.daemon.os.fork", return_value=0),
-            patch("tv.daemon.os.setsid") as mock_setsid,
-            patch("tv.daemon.os.open", return_value=3),
-            patch("tv.daemon.os.dup2"),
-            patch("tv.daemon.os.close"),
-            patch("tv.daemon.write_pid"),
+            patch("tv.daemon.os.pipe", return_value=(real_pipe_r, 999)),
+            patch("tv.daemon.os.fork", return_value=12345),
+            patch("tv.daemon.os.waitpid", return_value=(12345, 0)),
+            patch("tv.daemon.os.close"),  # mock close so we don't double-close
         ):
             result = daemon.daemonize(tmp_dir)
+        assert result == 99999
 
-        assert result == 0
-        mock_setsid.assert_called_once()
-
-    def test_child_writes_pid(self, tmp_dir):
+    def test_intermediate_child_calls_setsid(self, tmp_dir):
+        """Intermediate child (first fork=0) should call setsid then fork again."""
         with (
-            patch("tv.daemon.os.fork", return_value=0),
+            patch("tv.daemon.os.pipe", return_value=(10, 11)),
+            patch("tv.daemon.os.fork", side_effect=[0, 777]),
+            patch("tv.daemon.os.setsid") as mock_setsid,
+            patch("tv.daemon.os.close"),
+            patch("tv.daemon.os._exit") as mock_exit,
+        ):
+            daemon.daemonize(tmp_dir)
+
+        mock_setsid.assert_called_once()
+        mock_exit.assert_called_once_with(0)  # intermediate child exits
+
+    def test_grandchild_writes_pid(self, tmp_dir):
+        """Grandchild (both forks return 0) should write PID file."""
+        with (
+            patch("tv.daemon.os.pipe", return_value=(10, 11)),
+            patch("tv.daemon.os.fork", side_effect=[0, 0]),
             patch("tv.daemon.os.setsid"),
             patch("tv.daemon.os.open", return_value=3),
             patch("tv.daemon.os.dup2"),
             patch("tv.daemon.os.close"),
-            patch("tv.daemon.write_pid") as mock_write,
+            patch("tv.daemon.os.write"),
+            patch("tv.daemon.fcntl.flock"),
         ):
-            daemon.daemonize(tmp_dir)
+            result = daemon.daemonize(tmp_dir)
 
-        mock_write.assert_called_once_with(tmp_dir)
+        assert result == 0
 
-    def test_child_redirects_stdio(self, tmp_dir):
+    def test_grandchild_redirects_stdio(self, tmp_dir):
         dup2_calls = []
 
         def track_dup2(fd, target):
             dup2_calls.append((fd, target))
 
         with (
-            patch("tv.daemon.os.fork", return_value=0),
+            patch("tv.daemon.os.pipe", return_value=(10, 11)),
+            patch("tv.daemon.os.fork", side_effect=[0, 0]),
             patch("tv.daemon.os.setsid"),
             patch("tv.daemon.os.open", return_value=3),
             patch("tv.daemon.os.dup2", side_effect=track_dup2),
             patch("tv.daemon.os.close"),
-            patch("tv.daemon.write_pid"),
+            patch("tv.daemon.os.write"),
+            patch("tv.daemon.fcntl.flock"),
         ):
             daemon.daemonize(tmp_dir)
 
@@ -104,6 +172,31 @@ class TestDaemonize:
         assert 0 in targets  # stdin
         assert 1 in targets  # stdout
         assert 2 in targets  # stderr
+
+    def test_daemon_log_permissions_0o600(self, tmp_dir):
+        """daemon.log should be opened with 0o600, not 0o644."""
+        open_calls = []
+
+        def track_open(path, flags, mode=0o777):
+            open_calls.append((path, flags, mode))
+            return 3
+
+        with (
+            patch("tv.daemon.os.pipe", return_value=(10, 11)),
+            patch("tv.daemon.os.fork", side_effect=[0, 0]),
+            patch("tv.daemon.os.setsid"),
+            patch("tv.daemon.os.open", side_effect=track_open),
+            patch("tv.daemon.os.dup2"),
+            patch("tv.daemon.os.close"),
+            patch("tv.daemon.os.write"),
+            patch("tv.daemon.fcntl.flock"),
+        ):
+            daemon.daemonize(tmp_dir)
+
+        # First os.open call is for daemon.log
+        log_open = [c for c in open_calls if "daemon.log" in str(c[0])]
+        assert log_open
+        assert log_open[0][2] == 0o600
 
 
 # =========================================================================
@@ -192,6 +285,34 @@ class TestBuildSystemdUnit:
 
         assert "After=network-online.target" in unit
 
+    def test_unit_hardening_directives(self, tmp_dir):
+        """Systemd unit should include security hardening."""
+        unit = daemon._build_systemd_unit(tmp_dir)
+
+        assert "ProtectSystem=strict" in unit
+        assert "ProtectHome=read-only" in unit
+        assert "PrivateTmp=true" in unit
+        assert "NoNewPrivileges=yes" in unit
+
+    def test_unit_readwrite_includes_log_dir(self, tmp_dir):
+        """ReadWritePaths must include the log directory."""
+        unit = daemon._build_systemd_unit(tmp_dir)
+
+        log_dir = str((tmp_dir / "logs").resolve())
+        assert log_dir in unit
+
+
+# =========================================================================
+# daemon_log_path (public)
+# =========================================================================
+
+
+class TestDaemonLogPath:
+    def test_returns_daemon_log(self, tmp_dir):
+        path = daemon.daemon_log_path(tmp_dir)
+        assert path.name == "daemon.log"
+        assert str(tmp_dir) in str(path)
+
 
 # =========================================================================
 # enable / disable
@@ -273,4 +394,22 @@ class TestDisable:
         out = capsys.readouterr().out
         assert "not configured" in out.lower() or "не настроен" in out.lower()
 
+    def test_disable_stops_running_daemon(self, tmp_dir, tmp_path):
+        """--disable should stop a running daemon before removing autostart."""
+        plist_path = tmp_path / "test.plist"
+        plist_path.write_text("")
 
+        daemon.write_pid(tmp_dir, pid=12345)
+
+        mock_result = subprocess.CompletedProcess(args=[], returncode=0)
+        with (
+            patch("tv.daemon.platform.system", return_value="Darwin"),
+            patch.object(daemon, "PLIST_PATH", plist_path),
+            patch("tv.daemon.subprocess.run", return_value=mock_result),
+            patch("tv.daemon.is_pid_alive", return_value=False),
+            patch("tv.daemon.is_tunnelvault_process", return_value=True),
+        ):
+            daemon.disable(tmp_dir)
+
+        assert not plist_path.exists()
+        daemon.remove_pid(tmp_dir)

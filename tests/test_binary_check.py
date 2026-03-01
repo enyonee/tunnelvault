@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
 from tv.engine import Engine
-from tv.vpn.base import TunnelConfig, TunnelPlugin, VPNResult
+from tv.vpn.base import TunnelPlugin, VPNResult
 from tv.vpn.openvpn import OpenVPNPlugin
 from tv.vpn.fortivpn import FortiVPNPlugin
 from tv.vpn.singbox import SingBoxPlugin

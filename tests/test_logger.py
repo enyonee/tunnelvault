@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-import pytest
 
 from tv.app_config import cfg
 from tv.logger import Logger

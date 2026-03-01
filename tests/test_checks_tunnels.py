@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from tv.checks import run_all_from_tunnels, CheckResult, _parse_fallback, _run_ping_check
+from tv.checks import run_all_from_tunnels, _parse_fallback
 
 
 class TestRunAllFromTunnels:

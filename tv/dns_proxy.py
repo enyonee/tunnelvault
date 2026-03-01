@@ -81,8 +81,12 @@ class BypassDNSProxy:
         """Restart serving thread on existing socket (e.g. after fork).
 
         The socket survives fork but the thread does not.
+        Safe to call only when the old thread is dead (e.g. post-fork).
         """
         if self._sock is None:
+            return
+        if self._thread is not None and self._thread.is_alive():
+            self._log.log("WARN", "DNS proxy restart_thread: thread still alive, skipping")
             return
         self._stop_event.clear()
         self._thread = threading.Thread(
